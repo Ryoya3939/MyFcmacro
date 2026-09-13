@@ -1,0 +1,205 @@
+import FreeCAD as App
+import math
+import ezdxf
+from PySide import QtWidgets
+
+sketch = App.ActiveDocument.getObject("Sketch")
+
+filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+    None,
+    "DXF保存",
+    "",
+    "DXF Files (*.dxf)"
+)
+
+if filename:
+
+    doc = ezdxf.new("R12")
+    msp = doc.modelspace()
+
+    if "DASHED" not in doc.linetypes:
+        doc.linetypes.add(
+            "DASHED",
+            description="Dashed line",
+            pattern=[3.0, -3.0]
+        )
+
+    for i, geo in enumerate(sketch.Geometry):
+
+        is_construction = sketch.getConstruction(i)
+
+        if type(geo).__name__ == "LineSegment":
+
+            line = msp.add_line(
+                (geo.StartPoint.x, geo.StartPoint.y),
+                (geo.EndPoint.x, geo.EndPoint.y)
+            )
+
+            if is_construction:
+                line.dxf.linetype = "DASHED"
+
+        elif type(geo).__name__ == "Circle":
+
+            msp.add_circle(
+                (geo.Center.x, geo.Center.y),
+                geo.Radius
+            )
+
+        elif type(geo).__name__ == "ArcOfCircle":
+
+            start_angle = math.degrees(geo.FirstParameter)
+            end_angle = math.degrees(geo.LastParameter)
+
+            msp.add_arc(
+                (geo.Center.x, geo.Center.y),
+                geo.Radius,
+                start_angle,
+                end_angle
+            )
+
+    for i, c in enumerate(sketch.Constraints):
+
+        if c.Type != "Distance":
+            continue
+
+        if c.First < 0 or c.Second < 0:
+            continue
+
+        p1 = sketch.getPoint(c.First, c.FirstPos)
+        p2 = sketch.getPoint(c.Second, c.SecondPos)
+
+        dx = p2.x - p1.x
+        dy = p2.y - p1.y
+
+        length = math.sqrt(dx * dx + dy * dy)
+
+        if length == 0:
+            continue
+
+        label_position = sketch.getLabelPosition(i)
+        label_distance = sketch.getLabelDistance(i)
+
+        if abs(dx) < 1e-9:
+
+            dim_x = p1.x - label_distance
+            dim_y = label_position
+
+            dimension_distance = label_distance
+
+            dim = msp.add_aligned_dim(
+                p1=(p1.x, p1.y),
+                p2=(p2.x, p2.y),
+                distance=dimension_distance
+            )
+
+            dim.set_location((dim_x, dim_y))
+            dim.render()
+
+            block_name = dim.dimension.dxf.geometry
+            block = doc.blocks[block_name]
+
+            if label_distance < 0:
+                side = 1.0
+                text_rotation = 90.0
+            else:
+                side = -1.0
+                text_rotation = 270.0
+
+            for entity in block:
+
+                if entity.dxftype() == "LINE":
+
+                    start = entity.dxf.start
+                    end = entity.dxf.end
+
+                    entity.dxf.start = (
+                        abs(start.x) * side,
+                        start.y,
+                        start.z
+                    )
+
+                    entity.dxf.end = (
+                        abs(end.x) * side,
+                        end.y,
+                        end.z
+                    )
+
+                elif entity.dxftype() == "INSERT":
+
+                    insert = entity.dxf.insert
+
+                    entity.dxf.insert = (
+                        abs(insert.x) * side,
+                        insert.y,
+                        insert.z
+                    )
+
+                    if entity.dxf.hasattr("rotation"):
+                        entity.dxf.rotation = text_rotation
+
+                elif entity.dxftype() == "TEXT":
+
+                    insert = entity.dxf.insert
+
+                    entity.dxf.insert = (
+                        dim_x,
+                        insert.y,
+                        insert.z
+                    )
+
+                    if entity.dxf.hasattr("align_point"):
+                        align = entity.dxf.align_point
+
+                        entity.dxf.align_point = (
+                            dim_x,
+                            align.y,
+                            align.z
+                        )
+
+                    entity.dxf.rotation = text_rotation
+
+            dim.dimension.dxf.defpoint = (
+                dim_x,
+                p1.y,
+                0.0
+            )
+
+            print(
+                "Distance寸法を出力:",
+                i,
+                c.Value,
+                "寸法位置X:",
+                dim_x,
+                "テキストY:",
+                dim_y,
+                "文字角度:",
+                text_rotation
+            )
+
+        else:
+
+            mid_x = (p1.x + p2.x) / 2.0
+            mid_y = (p1.y + p2.y) / 2.0
+
+            dim = msp.add_aligned_dim(
+                p1=(p1.x, p1.y),
+                p2=(p2.x, p2.y),
+                distance=label_position
+            )
+
+            dim.set_location((mid_x, mid_y))
+            dim.render()
+
+            print(
+                "Distance寸法を出力:",
+                i,
+                c.Value,
+                "位置:",
+                mid_x,
+                mid_y
+            )
+
+    doc.saveas(filename)
+
+    print("DXFを書き出しました:")
+    print(filename)

@@ -1,0 +1,680 @@
+import os
+import io
+import math
+import FreeCAD as App
+import FreeCADGui as Gui
+import TechDraw
+import ezdxf
+import Part
+from PySide import QtWidgets, QtCore
+
+doc = App.ActiveDocument
+
+if doc is None:
+    QtWidgets.QMessageBox.critical(
+        None,
+        "DXF",
+        "アクティブなドキュメントがありません。"
+    )
+    raise Exception("ActiveDocumentがありません")
+
+proj = doc.getObject("ProjGroup")
+
+if proj is None:
+    QtWidgets.QMessageBox.critical(
+        None,
+        "DXF",
+        "ProjGroupがありません。"
+    )
+    raise Exception("ProjGroupがありません")
+
+desktop = QtCore.QStandardPaths.writableLocation(
+    QtCore.QStandardPaths.DesktopLocation
+)
+
+if not desktop or not os.path.isdir(desktop):
+    desktop = os.path.expanduser("~")
+
+safe_name = "".join(
+    c if c not in '\\/:*?"<>|' else "_"
+    for c in doc.Label
+)
+
+filename = os.path.join(
+    desktop,
+    safe_name + "_TechDraw_HiddenVisible_Rotate.dxf"
+)
+
+LAYER_FRONT_VISIBLE = "Front_Visible"
+LAYER_FRONT_HIDDEN = "Front_Hidden"
+
+LAYER_RIGHT_VISIBLE = "Right_Visible"
+LAYER_RIGHT_HIDDEN = "Right_Hidden"
+
+LAYER_LEFT_VISIBLE = "Left_Visible"
+LAYER_LEFT_HIDDEN = "Left_Hidden"
+
+dxf = ezdxf.new("R2010")
+msp = dxf.modelspace()
+
+if "HIDDEN" not in dxf.linetypes:
+    dxf.linetypes.add(
+        "HIDDEN",
+        pattern=[0.6, -0.3]
+    )
+
+layer_defs = [
+    (LAYER_FRONT_VISIBLE, 1, "CONTINUOUS"),
+    (LAYER_FRONT_HIDDEN, 1, "HIDDEN"),
+
+    (LAYER_RIGHT_VISIBLE, 3, "CONTINUOUS"),
+    (LAYER_RIGHT_HIDDEN, 3, "HIDDEN"),
+
+    (LAYER_LEFT_VISIBLE, 5, "CONTINUOUS"),
+    (LAYER_LEFT_HIDDEN, 5, "HIDDEN"),
+]
+
+for name, color, ltype in layer_defs:
+
+    if name not in dxf.layers:
+
+        dxf.layers.add(
+            name,
+            color=color,
+            linetype=ltype
+        )
+
+
+def get_layers(view):
+
+    label = str(view.Label)
+
+    if label == "Front":
+        return (
+            LAYER_FRONT_VISIBLE,
+            LAYER_FRONT_HIDDEN
+        )
+
+    if label == "右面":
+        return (
+            LAYER_RIGHT_VISIBLE,
+            LAYER_RIGHT_HIDDEN
+        )
+
+    if label == "左面":
+        return (
+            LAYER_LEFT_VISIBLE,
+            LAYER_LEFT_HIDDEN
+        )
+
+    visible = label + "_Visible"
+    hidden = label + "_Hidden"
+
+    if visible not in dxf.layers:
+        dxf.layers.add(
+            visible,
+            color=7,
+            linetype="CONTINUOUS"
+        )
+
+    if hidden not in dxf.layers:
+        dxf.layers.add(
+            hidden,
+            color=7,
+            linetype="HIDDEN"
+        )
+
+    return visible, hidden
+
+
+def read_project_dxf(dxf_text):
+
+    if not dxf_text:
+        return None
+
+    full = (
+        "0\n"
+        "SECTION\n"
+        "2\n"
+        "HEADER\n"
+        "0\n"
+        "ENDSEC\n"
+        "0\n"
+        "SECTION\n"
+        "2\n"
+        "ENTITIES\n"
+        +
+        dxf_text
+        +
+        "0\n"
+        "ENDSEC\n"
+        "0\n"
+        "EOF\n"
+    )
+
+    try:
+
+        return ezdxf.read(
+            io.StringIO(full)
+        )
+
+    except Exception as e:
+
+        print(
+            "projectToDXF読み込み失敗:",
+            e
+        )
+
+        return None
+
+
+# ============================================================
+# 2D回転
+# ============================================================
+
+def rotate_xy(x, y, angle):
+
+    rad = math.radians(angle)
+
+    c = math.cos(rad)
+    s = math.sin(rad)
+
+    return (
+        x * c - y * s,
+        x * s + y * c
+    )
+
+
+# ============================================================
+# Entity座標変換
+# ============================================================
+
+def transform_entity(entity, angle):
+
+    if angle == 0:
+        return
+
+    typ = entity.dxftype()
+
+    # --------------------------------------------------------
+    # LINE
+    # --------------------------------------------------------
+
+    if typ == "LINE":
+
+        p1 = entity.dxf.start
+        p2 = entity.dxf.end
+
+        x1, y1 = rotate_xy(
+            p1.x,
+            p1.y,
+            angle
+        )
+
+        x2, y2 = rotate_xy(
+            p2.x,
+            p2.y,
+            angle
+        )
+
+        entity.dxf.start = (
+            x1,
+            y1,
+            p1.z
+        )
+
+        entity.dxf.end = (
+            x2,
+            y2,
+            p2.z
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # CIRCLE
+    # --------------------------------------------------------
+
+    if typ == "CIRCLE":
+
+        c = entity.dxf.center
+
+        x, y = rotate_xy(
+            c.x,
+            c.y,
+            angle
+        )
+
+        entity.dxf.center = (
+            x,
+            y,
+            c.z
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # ARC
+    # --------------------------------------------------------
+
+    if typ == "ARC":
+
+        c = entity.dxf.center
+
+        x, y = rotate_xy(
+            c.x,
+            c.y,
+            angle
+        )
+
+        entity.dxf.center = (
+            x,
+            y,
+            c.z
+        )
+
+        entity.dxf.start_angle += angle
+        entity.dxf.end_angle += angle
+
+        return
+
+    # --------------------------------------------------------
+    # LWPOLYLINE
+    # --------------------------------------------------------
+
+    if typ == "LWPOLYLINE":
+
+        points = []
+
+        for p in entity.get_points(
+            "xyseb"
+        ):
+
+            x, y = rotate_xy(
+                p[0],
+                p[1],
+                angle
+            )
+
+            points.append(
+                (
+                    x,
+                    y,
+                    p[2],
+                    p[3],
+                    p[4]
+                )
+            )
+
+        entity.set_points(
+            points,
+            format="xyseb"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # SPLINE
+    # --------------------------------------------------------
+
+    if typ == "SPLINE":
+
+        try:
+
+            if entity.dxf.hasattr(
+                "control_points"
+            ):
+
+                cps = []
+
+                for p in entity.control_points:
+
+                    x, y = rotate_xy(
+                        p.x,
+                        p.y,
+                        angle
+                    )
+
+                    cps.append(
+                        (
+                            x,
+                            y,
+                            p.z
+                        )
+                    )
+
+                entity.control_points = cps
+
+        except Exception as e:
+
+            print(
+                "SPLINE control_points変換失敗:",
+                e
+            )
+
+        try:
+
+            if entity.dxf.hasattr(
+                "fit_points"
+            ):
+
+                fps = []
+
+                for p in entity.fit_points:
+
+                    x, y = rotate_xy(
+                        p.x,
+                        p.y,
+                        angle
+                    )
+
+                    fps.append(
+                        (
+                            x,
+                            y,
+                            p.z
+                        )
+                    )
+
+                entity.fit_points = fps
+
+        except Exception as e:
+
+            print(
+                "SPLINE fit_points変換失敗:",
+                e
+            )
+
+        return
+
+
+def copy_entities_from_project(
+    dxf_text,
+    target_layer,
+    hidden=False,
+    rotation=0
+):
+
+    temp_doc = read_project_dxf(
+        dxf_text
+    )
+
+    if temp_doc is None:
+        return 0
+
+    temp_msp = temp_doc.modelspace()
+
+    count = 0
+
+    for entity in temp_msp:
+
+        try:
+
+            new_entity = entity.copy()
+
+            new_entity.dxf.layer = (
+                target_layer
+            )
+
+            if hidden:
+
+                new_entity.dxf.linetype = (
+                    "HIDDEN"
+                )
+
+            else:
+
+                new_entity.dxf.linetype = (
+                    "CONTINUOUS"
+                )
+
+            # 右面・左面だけ回転
+            transform_entity(
+                new_entity,
+                rotation
+            )
+
+            msp.add_entity(
+                new_entity
+            )
+
+            count += 1
+
+        except Exception as e:
+
+            print(
+                "Entityコピー失敗:",
+                entity.dxftype(),
+                e
+            )
+
+    return count
+
+
+def process_view(view):
+
+    visible_layer, hidden_layer = (
+        get_layers(view)
+    )
+
+    label = str(view.Label)
+
+    # ========================================================
+    # Viewごとの回転
+    # ========================================================
+
+    if label == "Front":
+
+        rotation = 0
+
+    elif label == "右面":
+
+        rotation = 90
+
+    elif label == "左面":
+
+        rotation = -90
+
+    else:
+
+        rotation = 0
+
+    print("")
+    print("========================================")
+    print("VIEW:", label)
+    print("Direction:", view.Direction)
+    print("Rotation:", rotation)
+    print("========================================")
+
+    # ========================================================
+    # Visible
+    # ========================================================
+
+    try:
+
+        visible_edges = list(
+            view.getVisibleEdges()
+        )
+
+    except Exception as e:
+
+        print(
+            "getVisibleEdges()失敗:",
+            e
+        )
+
+        visible_edges = []
+
+    print(
+        "Visible Edges =",
+        len(visible_edges)
+    )
+
+    visible_count = 0
+
+    if visible_edges:
+
+        try:
+
+            visible_shape = (
+                Part.Compound(
+                    visible_edges
+                )
+            )
+
+            visible_dxf = (
+                TechDraw.projectToDXF(
+                    visible_shape,
+                    view.Direction
+                )
+            )
+
+            visible_count = (
+                copy_entities_from_project(
+                    visible_dxf,
+                    visible_layer,
+                    False,
+                    rotation
+                )
+            )
+
+        except Exception as e:
+
+            print(
+                "Visible処理失敗:",
+                e
+            )
+
+    # ========================================================
+    # Hidden
+    # ========================================================
+
+    try:
+
+        hidden_edges = list(
+            view.getHiddenEdges()
+        )
+
+    except Exception as e:
+
+        print(
+            "getHiddenEdges()失敗:",
+            e
+        )
+
+        hidden_edges = []
+
+    print(
+        "Hidden Edges =",
+        len(hidden_edges)
+    )
+
+    hidden_count = 0
+
+    if hidden_edges:
+
+        try:
+
+            hidden_shape = (
+                Part.Compound(
+                    hidden_edges
+                )
+            )
+
+            hidden_dxf = (
+                TechDraw.projectToDXF(
+                    hidden_shape,
+                    view.Direction
+                )
+            )
+
+            hidden_count = (
+                copy_entities_from_project(
+                    hidden_dxf,
+                    hidden_layer,
+                    True,
+                    rotation
+                )
+            )
+
+        except Exception as e:
+
+            print(
+                "Hidden処理失敗:",
+                e
+            )
+
+    print(
+        "Visible DXF =",
+        visible_count
+    )
+
+    print(
+        "Hidden DXF =",
+        hidden_count
+    )
+
+    return (
+        visible_count,
+        hidden_count
+    )
+
+
+# ============================================================
+# 全View
+# ============================================================
+
+print("")
+print("========================================")
+print("TechDraw Visible / Hidden DXF")
+print("========================================")
+
+for view in proj.Views:
+
+    try:
+
+        if (
+            view.TypeId
+            != "TechDraw::DrawProjGroupItem"
+        ):
+            continue
+
+    except Exception:
+
+        continue
+
+    try:
+
+        process_view(view)
+
+    except Exception as e:
+
+        print(
+            "View処理エラー:",
+            view.Label,
+            e
+        )
+
+
+# ============================================================
+# 保存
+# ============================================================
+
+dxf.saveas(
+    filename
+)
+
+print("")
+print("========================================")
+print("DXF保存完了")
+print("========================================")
+
+print(
+    filename
+)
+
+QtWidgets.QMessageBox.information(
+    None,
+    "DXF",
+    "DXF保存完了\n\n" + filename
+)

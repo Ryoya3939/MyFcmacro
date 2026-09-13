@@ -1,0 +1,129 @@
+import FreeCAD as App
+import ezdxf
+import Part
+from PySide import QtWidgets
+import math
+from ezdxf import units
+page = [o for o in App.ActiveDocument.Objects
+        if o.TypeId == "TechDraw::DrawPage"][0]
+
+filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+    None,
+    "DXF保存",
+    "test.dxf",
+    "DXF (*.dxf)")
+
+if not filename:
+    raise SystemExit
+
+doc = ezdxf.new("R12",)
+doc.layers.add("Visible", linetype="CONTINUOUS")
+doc.layers.add("Hidden", linetype="HIDDEN")
+
+msp = doc.modelspace()
+def same_edge(e1, e2, tol=1e-6):
+
+    if type(e1.Curve) != type(e2.Curve):
+        return False
+
+    if isinstance(e1.Curve, Part.Line):
+
+        a1 = e1.firstVertex().Point
+        b1 = e1.lastVertex().Point
+        a2 = e2.firstVertex().Point
+        b2 = e2.lastVertex().Point
+
+        return (
+            (a1.distanceToPoint(a2) < tol and b1.distanceToPoint(b2) < tol) or
+            (a1.distanceToPoint(b2) < tol and b1.distanceToPoint(a2) < tol)
+        )
+
+    elif isinstance(e1.Curve, Part.Circle):
+
+        return (
+            e1.Curve.Center.distanceToPoint(e2.Curve.Center) < tol and
+            abs(e1.Curve.Radius - e2.Curve.Radius) < tol and
+            abs(e1.Length - e2.Length) < tol
+        )
+
+    return False
+
+# ページ内の全ビューを処理
+for obj in page.Views:
+
+    # 投影グループだけ処理
+    if obj.TypeId != "TechDraw::DrawProjGroup":
+        continue
+
+    for view in obj.Views:
+
+        print("Export:", view.Label)
+        
+        xoff = view.X.Value
+        yoff = view.Y.Value
+        
+        visible = view.getVisibleEdges()
+
+        for e in visible:
+            curve = e.Curve
+            
+            if isinstance(curve, Part.Line):
+
+                p1 = e.Vertexes[0].Point
+                p2 = e.Vertexes[1].Point
+                
+                msp.add_line(
+                    (p1.x+xoff,-(p1.y)+yoff),
+                    (p2.x+xoff,-(p2.y)+yoff),
+                    dxfattribs={"layer": "Visible"} )
+
+            elif isinstance(curve, Part.Circle):
+
+                center = curve.Center
+                radius = curve.Radius
+
+                if len(e.Vertexes) == 1:
+                 #完全な円
+                    msp.add_circle(
+                        (center.x + xoff, -center.y + yoff),
+                        radius,
+                        dxfattribs={"layer": "Visible"} )
+                elif len(e.Vertexes) == 2:
+
+                    p1 = e.firstVertex().Point
+
+                    start = math.degrees( math.atan2(-(p1.y - center.y), p1.x - center.x) ) % 360
+
+                    sweep = math.degrees(e.Length / radius)
+
+                    msp.add_arc(
+                        (center.x + xoff, -center.y + yoff),
+                        radius,
+                        start_angle=start,
+                        end_angle=(start + sweep) % 360,
+                        dxfattribs={"layer": "Visible"} )
+        hidden = view.getHiddenEdges()
+        
+        for e in hidden:
+
+            if any(same_edge(e, v) for v in visible):
+                continue
+            curve = e.Curve
+            if isinstance(curve, Part.Line):
+
+                 p1 = e.Vertexes[0].Point
+                 p2 = e.Vertexes[1].Point
+
+                 msp.add_line(
+                     (p1.x + xoff, -(p1.y) + yoff),
+                     (p2.x + xoff, -(p2.y) + yoff),
+                     dxfattribs={"layer": "Hidden"} )
+        for ce in view.CosmeticEdges:
+
+            msp.add_line(
+                (ce.Start.x + xoff, ce.Start.y + yoff),
+                (ce.End.x + xoff, ce.End.y + yoff),
+                dxfattribs={"layer": "Visible"} )
+doc.saveas(filename)
+
+

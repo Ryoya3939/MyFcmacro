@@ -1,0 +1,137 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import Draft
+from PySide2 import QtCore, QtWidgets  # FreeCAD内蔵のPySide2を使用
+
+class RLabelWindow(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+        
+    def initUI(self):
+        # ウィンドウの設定
+        self.setWindowTitle("R寸法ラベル自動作成")
+        self.setGeometry(300, 300, 300, 250)
+        self.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint) # FreeCADの手前に常に表示
+        
+        layout = QtWidgets.QVBoxLayout()
+        
+        # --- 見た目の設定項目 ---
+        # 矢印タイプ
+        layout.addWidget(QtWidgets.QLabel("矢印の形状 (Arrow, Dot, Circle, Tick):"))
+        self.combo_arrow = QtWidgets.QComboBox()
+        self.combo_arrow.addItems(["Arrow", "Dot", "Circle", "Tick"])
+        layout.addWidget(self.combo_arrow)
+        
+        # 矢印サイズ
+        layout.addWidget(QtWidgets.QLabel("矢印の大きさ (mm):"))
+        self.spin_arrow_size = QtWidgets.QDoubleSpinBox()
+        self.spin_arrow_size.setValue(1.0)
+        layout.addWidget(self.spin_arrow_size)
+        
+        # 文字サイズ
+        layout.addWidget(QtWidgets.QLabel("文字の大きさ:"))
+        self.spin_font_size = QtWidgets.QDoubleSpinBox()
+        self.spin_font_size.setValue(2.0)
+        layout.addWidget(self.spin_font_size)
+        
+        # オフセット距離
+        layout.addWidget(QtWidgets.QLabel("離す距離 (mm):"))
+        self.spin_offset = QtWidgets.QDoubleSpinBox()
+        self.spin_offset.setMaximum(1000.0)
+        self.spin_offset.setValue(20.0)
+        layout.addWidget(self.spin_offset)
+        
+        # --- 実行ボタン ---
+        self.btn_run = QtWidgets.QPushButton("選択したエッジにラベルを作成")
+        self.btn_run.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 5px;")
+        self.btn_run.clicked.connect(self.draw_r_label)
+        layout.addWidget(self.btn_run)
+        
+        self.setLayout(layout)
+        
+    def draw_r_label(self):
+        sel = Gui.Selection.getSelectionEx()
+        if not sel:
+            QtWidgets.QMessageBox.warning(self, "警告", "オブジェクトやエッジが選択されていません。")
+            return
+
+        # GUIから設定値を取得
+        arrow_type = self.combo_arrow.currentText()
+        arrow_size = self.spin_arrow_size.value()
+        font_size = self.spin_font_size.value()
+        offset_len = self.spin_offset.value()
+        
+        line_width = 1.0
+        my_color = (0.0, 1.0, 0.0, 1.0) # 緑色
+
+        count = 0
+        for s in sel:
+            obj = s.Object if hasattr(s, "Object") else None
+            if not obj or not hasattr(obj, "Shape"):
+                continue
+                
+            for edge in obj.Shape.Edges:
+                if not edge.Curve or type(edge.Curve).__name__ not in ["Circle", "ArcOfCircle"]:
+                    continue
+                    
+                txt = f"R{edge.Curve.Radius:.2f}"
+                
+                # パラメータ計算
+                p_start = edge.FirstParameter
+                p_end = edge.LastParameter
+                p_center = p_start + (p_end - p_start) / 2.0
+                
+                point = edge.valueAt(p_center)
+                center = edge.Curve.Center
+                
+                vx = point.x - center.x
+                vy = point.y - center.y
+                vz = point.z - center.z
+                length = (vx**2 + vy**2 + vz**2)**0.5
+                if length == 0: continue
+                
+                lx = point.x + (vx / length) * offset_len
+                ly = point.y + (vy / length) * offset_len
+                lz = point.z + (vz / length) * offset_len
+                
+                # ラベルオブジェクト作成
+                label_obj = Draft.make_label(
+                    target_point=App.Vector(point.x, point.y, point.z),
+                    placement=App.Placement(App.Vector(lx, ly, lz), App.Rotation(0.0, 0.0, 0.0, 1.0)),
+                    label_type='Custom',
+                    direction='Horizontal',
+                    custom_text=txt
+                )
+                
+                if hasattr(label_obj, "ViewObject") and label_obj.ViewObject:
+                    vo = label_obj.ViewObject
+                    vo.TextColor = my_color
+                    vo.LineColor = my_color
+                    vo.FontSize  = font_size
+                    vo.LineWidth = line_width
+                    
+                    if hasattr(vo, "ArrowTypeStart"):
+                        vo.ArrowTypeStart = arrow_type
+                    if hasattr(vo, "ArrowSize"):
+                        vo.ArrowSize = arrow_size
+                
+                Draft.autogroup(label_obj)
+                count += 1
+
+        App.ActiveDocument.recompute()
+        Gui.updateGui() 
+        
+        # 完了通知
+        QtWidgets.QMessageBox.information(self, "完了", f"合計 {count} 個のラベルを作成しました。")
+
+# FreeCAD上でウィンドウを表示させる処理
+# すでに同じウィンドウが開いている場合は一度閉じる（重複防止）
+try:
+    my_dialog.close()
+except NameError:
+    pass
+
+my_dialog = RLabelWindow()
+my_dialog.show()ss

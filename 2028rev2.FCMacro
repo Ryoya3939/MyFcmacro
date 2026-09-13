@@ -1,0 +1,1256 @@
+# -*- coding: utf-8 -*-
+import os
+import re
+import math
+from PySide import QtWidgets
+
+# ============================================================
+# TechDraw DXF 後処理・安全版
+#
+# 1. 起動時に「修正するデータを選択してください」
+# 2. TechDrawで出力したDXFを選択
+# 3. ANSI_1252 -> ANSI_932
+# 4. View -> 正面図
+# 5. ProjItem -> 側面図
+# 6. ProjItem001 -> 側面図2
+# 7. Annotation系 -> 注釈
+# 8. Dimension系 -> 寸法
+# 9. LWPOLYLINE -> L
+# 10. DIMENSION -> Dimension
+# 11. STYLE TABLE内の arial.ttf -> msgothic.ttc
+# 12. LINE完全重複削除
+# 13. 短いLINEが長いLINEの上に完全に含まれる場合、短いLINEを削除
+# 14. 未使用レイヤー削除はしない
+# 15. CP932で保存
+#
+# ★安全版
+# DXF TABLEの削除は行わない
+# BLOCKS / OBJECTS / TABLES は可能な限りそのまま維持
+# ============================================================
+
+print("")
+print("============================================================")
+print(" TechDraw DXF 後処理・安全版")
+print("============================================================")
+
+# ============================================================
+# 設定
+# ============================================================
+
+LINE_TOL = 0.00001
+ANGLE_TOL = 0.000001
+
+# ============================================================
+# 起動メッセージ
+# ============================================================
+
+app = QtWidgets.QApplication.instance()
+
+if app is None:
+    app = QtWidgets.QApplication([])
+
+QtWidgets.QMessageBox.information(
+    None,
+    "DXF修正",
+    "修正するデータを選択してください"
+)
+
+# ============================================================
+# ファイル選択
+# ============================================================
+
+file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+    None,
+    "TechDrawで出力したDXFを選択",
+    "",
+    "DXF Files (*.dxf);;All Files (*)"
+)
+
+if not file_path:
+    print("キャンセルされました")
+    raise SystemExit
+
+print("入力DXF:")
+print(file_path)
+
+# ============================================================
+# 出力ファイル名
+# ============================================================
+
+base, ext = os.path.splitext(file_path)
+output_path = base + "_修正済み.dxf"
+
+print("出力DXF:")
+print(output_path)
+
+# ============================================================
+# DXF読み込み
+# ============================================================
+
+def read_dxf_text(path):
+
+    data = open(path, "rb").read()
+
+    # BOM
+    if data.startswith(b"\xef\xbb\xbf"):
+        try:
+            return data.decode("utf-8-sig")
+        except:
+            pass
+
+    # UTF-8
+    try:
+        return data.decode("utf-8")
+    except:
+        pass
+
+    # CP932
+    try:
+        return data.decode("cp932")
+    except:
+        pass
+
+    # CP1252
+    try:
+        return data.decode("cp1252")
+    except:
+        pass
+
+    # 最終手段
+    return data.decode("latin-1")
+
+
+text = read_dxf_text(file_path)
+
+print("読み込み文字数:", len(text))
+
+# ============================================================
+# 改行統一
+# ============================================================
+
+text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+# ============================================================
+# $DWGCODEPAGE
+#
+# ANSI_1252 -> ANSI_932
+# ============================================================
+
+old_codepage = re.search(
+    r"(\$DWGCODEPAGE\s+3\s+)([^\s]+)",
+    text,
+    re.IGNORECASE
+)
+
+if old_codepage:
+
+    print(
+        "元コードページ:",
+        old_codepage.group(2)
+    )
+
+    text = re.sub(
+        r"(\$DWGCODEPAGE\s+3\s+)[^\s]+",
+        r"\1ANSI_932",
+        text,
+        flags=re.IGNORECASE
+    )
+
+else:
+
+    print("$DWGCODEPAGE が見つかりません")
+
+# ============================================================
+# DXF ENTITY解析
+# ============================================================
+
+lines = text.split("\n")
+
+def parse_entities(lines):
+
+    entities = []
+    i = 0
+
+    while i < len(lines):
+
+        if (
+            lines[i].strip() == "0"
+            and i + 1 < len(lines)
+        ):
+
+            typ = lines[i + 1].strip()
+
+            entity_types = {
+                "LINE",
+                "LWPOLYLINE",
+                "POLYLINE",
+                "CIRCLE",
+                "ARC",
+                "ELLIPSE",
+                "TEXT",
+                "MTEXT",
+                "DIMENSION",
+                "LEADER",
+                "INSERT",
+                "POINT",
+                "SOLID",
+                "3DFACE"
+            }
+
+            if typ in entity_types:
+
+                start = i
+                j = i + 2
+
+                while j < len(lines):
+
+                    if lines[j].strip() == "0":
+                        break
+
+                    j += 1
+
+                entities.append({
+                    "type": typ,
+                    "start": start,
+                    "end": j,
+                    "lines": lines[start:j]
+                })
+
+                i = j
+                continue
+
+        i += 1
+
+    return entities
+
+
+entities = parse_entities(lines)
+
+print(
+    "検出ENTITY数:",
+    len(entities)
+)
+
+# ============================================================
+# グループコード取得
+# ============================================================
+
+def get_group_values(
+    entity_lines,
+    code
+):
+
+    values = []
+    i = 0
+
+    while i + 1 < len(entity_lines):
+
+        if (
+            entity_lines[i].strip()
+            == str(code)
+        ):
+
+            values.append(
+                entity_lines[i + 1].strip()
+            )
+
+        i += 2
+
+    return values
+
+
+def get_group_value(
+    entity_lines,
+    code,
+    default=None
+):
+
+    vals = get_group_values(
+        entity_lines,
+        code
+    )
+
+    if vals:
+        return vals[0]
+
+    return default
+
+# ============================================================
+# レイヤー取得
+# ============================================================
+
+def get_layer(entity_lines):
+
+    return get_group_value(
+        entity_lines,
+        8,
+        ""
+    )
+
+# ============================================================
+# レイヤー変更
+# ============================================================
+
+def change_layer(
+    entity_lines,
+    new_layer
+):
+
+    result = list(entity_lines)
+    i = 0
+
+    while i + 1 < len(result):
+
+        if result[i].strip() == "8":
+
+            result[i + 1] = new_layer
+            return result
+
+        i += 2
+
+    return result
+
+# ============================================================
+# TechDrawレイヤー名変更
+#
+# View                 -> 正面図
+# ProjItem             -> 側面図
+# ProjItem001          -> 側面図2
+#
+# Annotation           -> 注釈
+# Annotation001        -> 注釈
+# Annotation002 ...    -> 注釈
+#
+# Dimension            -> 寸法
+# Dimension001         -> 寸法
+# Dimension002 ...     -> 寸法
+#
+# ★重要
+# ProjItem001を先に判定する
+# ============================================================
+
+layer_count = {
+    "View": 0,
+    "ProjItem": 0,
+    "ProjItem001": 0,
+    "Annotation": 0,
+    "Dimension": 0
+}
+
+for ent in entities:
+
+    old_layer = get_layer(
+        ent["lines"]
+    )
+
+    new_layer = None
+    count_key = None
+
+    # --------------------------------------------------------
+    # 側面図2
+    # --------------------------------------------------------
+
+    if old_layer == "ProjItem001":
+
+        new_layer = "側面図2"
+        count_key = "ProjItem001"
+
+    # --------------------------------------------------------
+    # 側面図
+    # --------------------------------------------------------
+
+    elif old_layer == "ProjItem":
+
+        new_layer = "側面図"
+        count_key = "ProjItem"
+
+    # --------------------------------------------------------
+    # 正面図
+    # --------------------------------------------------------
+
+    elif old_layer == "View":
+
+        new_layer = "正面図"
+        count_key = "View"
+
+    # --------------------------------------------------------
+    # 注釈
+    # --------------------------------------------------------
+
+    elif old_layer.startswith("Annotation"):
+
+        new_layer = "注釈"
+        count_key = "Annotation"
+
+    # --------------------------------------------------------
+    # 寸法
+    # --------------------------------------------------------
+
+    elif old_layer.startswith("Dimension"):
+
+        new_layer = "寸法"
+        count_key = "Dimension"
+
+    # --------------------------------------------------------
+    # レイヤー変更
+    # --------------------------------------------------------
+
+    if new_layer is not None:
+
+        new_lines = change_layer(
+            ent["lines"],
+            new_layer
+        )
+
+        lines[
+            ent["start"]:
+            ent["end"]
+        ] = new_lines
+
+        layer_count[count_key] += 1
+
+
+print(
+    "View -> 正面図:",
+    layer_count["View"]
+)
+
+print(
+    "ProjItem -> 側面図:",
+    layer_count["ProjItem"]
+)
+
+print(
+    "ProjItem001 -> 側面図2:",
+    layer_count["ProjItem001"]
+)
+
+print(
+    "Annotation系 -> 注釈:",
+    layer_count["Annotation"]
+)
+
+print(
+    "Dimension系 -> 寸法:",
+    layer_count["Dimension"]
+)
+
+# ============================================================
+# LWPOLYLINE
+#
+# LWPOLYLINEはすべて L レイヤーへ
+# ============================================================
+
+lw_count = 0
+dim_count = 0
+
+# 変更後に再解析する
+entities = parse_entities(lines)
+
+for ent in entities:
+
+    if ent["type"] != "LWPOLYLINE":
+        continue
+
+    new_lines = change_layer(
+        ent["lines"],
+        "L"
+    )
+
+    lines[
+        ent["start"]:
+        ent["end"]
+    ] = new_lines
+
+    lw_count += 1
+
+
+# ============================================================
+# DIMENSION
+#
+# DIMENSIONは Dimension レイヤーへ
+# ============================================================
+
+entities = parse_entities(lines)
+
+for ent in entities:
+
+    if ent["type"] != "DIMENSION":
+        continue
+
+    new_lines = change_layer(
+        ent["lines"],
+        "Dimension"
+    )
+
+    lines[
+        ent["start"]:
+        ent["end"]
+    ] = new_lines
+
+    dim_count += 1
+
+
+print(
+    "LWPOLYLINE -> L:",
+    lw_count
+)
+
+print(
+    "DIMENSION -> Dimension:",
+    dim_count
+)
+
+# ============================================================
+# STYLE TABLE
+#
+# ★重要
+#
+# DXF全体を
+#     3
+#     arial.ttf
+#
+# で置換しない。
+#
+# STYLE TABLE内だけを変更する。
+#
+# DXF仕様ではSTYLEのgroup code 3が
+# Primary font file name。
+# ============================================================
+
+print("")
+print("============================================================")
+print(" STYLE TABLE処理")
+print("============================================================")
+
+def replace_style_font(lines):
+
+    result = list(lines)
+    count = 0
+
+    i = 0
+
+    while i < len(result) - 1:
+
+        # ----------------------------------------------------
+        # TABLE STYLE開始
+        # ----------------------------------------------------
+
+        if (
+            result[i].strip() == "0"
+            and
+            result[i + 1].strip() == "TABLE"
+        ):
+
+            table_start = i
+            table_name = None
+
+            j = i + 2
+
+            while j < len(result) - 1:
+
+                if (
+                    result[j].strip() == "2"
+                    and
+                    result[j + 1].strip()
+                ):
+
+                    table_name = result[j + 1].strip()
+                    break
+
+                if (
+                    result[j].strip() == "0"
+                ):
+
+                    break
+
+                j += 1
+
+            # ------------------------------------------------
+            # STYLE TABLE
+            # ------------------------------------------------
+
+            if table_name == "STYLE":
+
+                table_end = None
+                j = table_start + 2
+
+                while j < len(result) - 1:
+
+                    if (
+                        result[j].strip() == "0"
+                        and
+                        result[j + 1].strip() == "ENDTAB"
+                    ):
+
+                        table_end = j
+                        break
+
+                    j += 1
+
+                if table_end is None:
+                    i += 1
+                    continue
+
+                # ------------------------------------------------
+                # STYLEレコードを処理
+                # ------------------------------------------------
+
+                j = table_start + 2
+
+                while j < table_end - 1:
+
+                    if (
+                        result[j].strip() == "0"
+                        and
+                        result[j + 1].strip() == "STYLE"
+                    ):
+
+                        record_start = j
+                        k = j + 2
+
+                        while k < table_end:
+
+                            if result[k].strip() == "0":
+                                break
+
+                            k += 1
+
+                        record_end = k
+
+                        # ----------------------------------------
+                        # STYLEレコード内だけ調べる
+                        # ----------------------------------------
+
+                        p = record_start + 2
+
+                        while p < record_end - 1:
+
+                            if (
+                                result[p].strip() == "3"
+                            ):
+
+                                font_name = (
+                                    result[p + 1].strip()
+                                )
+
+                                if font_name.lower() == "arial.ttf":
+
+                                    result[p + 1] = (
+                                        "msgothic.ttc"
+                                    )
+
+                                    count += 1
+
+                                break
+
+                            p += 2
+
+                        j = record_end
+                        continue
+
+                    j += 1
+
+                i = table_end + 1
+                continue
+
+        i += 1
+
+    return result, count
+
+
+lines, font_count = replace_style_font(lines)
+
+print(
+    "STYLE TABLE arial.ttf -> msgothic.ttc:",
+    font_count
+)
+
+# ============================================================
+# LINE情報を再取得
+# ============================================================
+
+entities2 = parse_entities(lines)
+
+# ============================================================
+# LINEの座標取得
+# ============================================================
+
+def get_line_points(
+    entity_lines
+):
+
+    x1 = get_group_value(
+        entity_lines,
+        10
+    )
+
+    y1 = get_group_value(
+        entity_lines,
+        20
+    )
+
+    x2 = get_group_value(
+        entity_lines,
+        11
+    )
+
+    y2 = get_group_value(
+        entity_lines,
+        21
+    )
+
+    if None in (
+        x1,
+        y1,
+        x2,
+        y2
+    ):
+
+        return None
+
+    try:
+
+        return (
+            float(x1),
+            float(y1),
+            float(x2),
+            float(y2)
+        )
+
+    except:
+
+        return None
+
+# ============================================================
+# 距離
+# ============================================================
+
+def dist(
+    x1,
+    y1,
+    x2,
+    y2
+):
+
+    return math.hypot(
+        x2 - x1,
+        y2 - y1
+    )
+
+# ============================================================
+# 点が線分上にあるか
+# ============================================================
+
+def point_on_segment(
+    px,
+    py,
+    ax,
+    ay,
+    bx,
+    by,
+    tol=LINE_TOL
+):
+
+    abx = bx - ax
+    aby = by - ay
+
+    apx = px - ax
+    apy = py - ay
+
+    length2 = (
+        abx * abx +
+        aby * aby
+    )
+
+    if length2 <= tol * tol:
+
+        return (
+            dist(
+                px,
+                py,
+                ax,
+                ay
+            ) <= tol
+        )
+
+    # 外積
+    cross = abs(
+        abx * apy -
+        aby * apx
+    )
+
+    if cross > (
+        tol * math.sqrt(length2)
+    ):
+
+        return False
+
+    dot = (
+        apx * abx +
+        apy * aby
+    )
+
+    if dot < -tol:
+        return False
+
+    if dot > length2 + tol:
+        return False
+
+    return True
+
+# ============================================================
+# 線分が長い線分の上に完全に含まれているか
+# ============================================================
+
+def segment_inside(
+    short_line,
+    long_line
+):
+
+    sx1, sy1, sx2, sy2 = short_line
+    lx1, ly1, lx2, ly2 = long_line
+
+    # 両端点が長い線上
+
+    if not point_on_segment(
+        sx1,
+        sy1,
+        lx1,
+        ly1,
+        lx2,
+        ly2
+    ):
+
+        return False
+
+    if not point_on_segment(
+        sx2,
+        sy2,
+        lx1,
+        ly1,
+        lx2,
+        ly2
+    ):
+
+        return False
+
+    return True
+
+# ============================================================
+# LINE一覧
+# ============================================================
+
+line_entities = []
+
+for ent in entities2:
+
+    if ent["type"] != "LINE":
+        continue
+
+    pts = get_line_points(
+        ent["lines"]
+    )
+
+    if pts is None:
+        continue
+
+    length = dist(
+        pts[0],
+        pts[1],
+        pts[2],
+        pts[3]
+    )
+
+    line_entities.append({
+        "entity": ent,
+        "points": pts,
+        "length": length,
+        "remove": False
+    })
+
+
+print(
+    "LINE数:",
+    len(line_entities)
+)
+
+# ============================================================
+# 完全重複LINE削除
+# ============================================================
+
+duplicate_count = 0
+
+def same_point(
+    a,
+    b
+):
+
+    return (
+        abs(a[0] - b[0]) <= LINE_TOL
+        and
+        abs(a[1] - b[1]) <= LINE_TOL
+    )
+
+
+def same_line(
+    a,
+    b
+):
+
+    a1 = (
+        a[0],
+        a[1]
+    )
+
+    a2 = (
+        a[2],
+        a[3]
+    )
+
+    b1 = (
+        b[0],
+        b[1]
+    )
+
+    b2 = (
+        b[2],
+        b[3]
+    )
+
+    if (
+        same_point(a1, b1)
+        and
+        same_point(a2, b2)
+    ):
+
+        return True
+
+    if (
+        same_point(a1, b2)
+        and
+        same_point(a2, b1)
+    ):
+
+        return True
+
+    return False
+
+
+for i in range(
+    len(line_entities)
+):
+
+    if line_entities[i]["remove"]:
+        continue
+
+    a = line_entities[i]["points"]
+
+    for j in range(
+        i + 1,
+        len(line_entities)
+    ):
+
+        if line_entities[j]["remove"]:
+            continue
+
+        b = line_entities[j]["points"]
+
+        if same_line(a, b):
+
+            line_entities[j]["remove"] = True
+            duplicate_count += 1
+
+
+print(
+    "完全重複LINE削除:",
+    duplicate_count
+)
+
+# ============================================================
+# 短いLINEが長いLINEの中に完全に含まれている場合
+# ============================================================
+
+contained_count = 0
+
+# 長い順
+
+sorted_lines = sorted(
+    line_entities,
+    key=lambda x: x["length"],
+    reverse=True
+)
+
+for i in range(
+    len(sorted_lines)
+):
+
+    long_item = sorted_lines[i]
+
+    if long_item["remove"]:
+        continue
+
+    long_line = long_item["points"]
+
+    for j in range(
+        i + 1,
+        len(sorted_lines)
+    ):
+
+        short_item = sorted_lines[j]
+
+        if short_item["remove"]:
+            continue
+
+        # 長さがほぼ同じなら重複処理側
+
+        if (
+            long_item["length"]
+            -
+            short_item["length"]
+        ) <= LINE_TOL:
+
+            continue
+
+        short_line = short_item["points"]
+
+        if segment_inside(
+            short_line,
+            long_line
+        ):
+
+            short_item["remove"] = True
+            contained_count += 1
+
+
+print(
+    "長いLINEに完全包含された短いLINE削除:",
+    contained_count
+)
+
+# ============================================================
+# 削除対象LINEを実際に削除
+#
+# ★LINEだけを削除
+# ★TABLES / BLOCKS / OBJECTS は削除しない
+# ============================================================
+
+remove_ranges = []
+
+for item in line_entities:
+
+    if item["remove"]:
+
+        ent = item["entity"]
+
+        remove_ranges.append(
+            (
+                ent["start"],
+                ent["end"]
+            )
+        )
+
+
+for start, end in sorted(
+    remove_ranges,
+    reverse=True
+):
+
+    del lines[
+        start:end
+    ]
+
+# ============================================================
+# 最終的なDXF文字列
+# ============================================================
+
+result_text = "\n".join(
+    lines
+)
+
+if not result_text.endswith("\n"):
+    result_text += "\n"
+
+# ============================================================
+# ANSI_932 最終確認
+# ============================================================
+
+result_text = re.sub(
+    r"(\$DWGCODEPAGE\s+3\s+)[^\s]+",
+    r"\1ANSI_932",
+    result_text,
+    flags=re.IGNORECASE
+)
+
+# ============================================================
+# STYLE TABLEの再確認
+#
+# 全体置換はしない
+# ============================================================
+
+final_lines = result_text.split("\n")
+
+final_lines, final_font_count = replace_style_font(
+    final_lines
+)
+
+if final_font_count:
+    print(
+        "STYLE TABLE再確認:",
+        final_font_count
+    )
+
+# ============================================================
+# 最終文字列再構成
+# ============================================================
+
+result_text = "\n".join(
+    final_lines
+)
+
+if not result_text.endswith("\n"):
+    result_text += "\n"
+
+# ============================================================
+# ANSI_932 最終確認
+# ============================================================
+
+result_text = re.sub(
+    r"(\$DWGCODEPAGE\s+3\s+)[^\s]+",
+    r"\1ANSI_932",
+    result_text,
+    flags=re.IGNORECASE
+)
+
+# ============================================================
+# CP932で保存
+#
+# DXF本体もCP932で保存
+# ============================================================
+
+try:
+
+    encoded = result_text.encode(
+        "cp932",
+        errors="strict"
+    )
+
+except UnicodeEncodeError as e:
+
+    print("")
+    print(
+        "WARNING: CP932に変換できない文字があります"
+    )
+
+    print(e)
+
+    print("")
+    print(
+        "変換できない文字を ? に置換して保存します"
+    )
+
+    encoded = result_text.encode(
+        "cp932",
+        errors="replace"
+    )
+
+
+with open(
+    output_path,
+    "wb"
+) as f:
+
+    f.write(encoded)
+
+# ============================================================
+# 保存後の簡易検査
+# ============================================================
+
+print("")
+print("============================================================")
+print(" 保存後DXF検査")
+print("============================================================")
+
+try:
+
+    check_data = open(
+        output_path,
+        "rb"
+    ).read()
+
+    print(
+        "保存サイズ:",
+        len(check_data),
+        "bytes"
+    )
+
+    check_text = check_data.decode(
+        "cp932"
+    )
+
+    print(
+        "CP932読み戻し: OK"
+    )
+
+    # SECTION / EOF確認
+
+    if "SECTION" in check_text:
+        print(
+            "SECTION: OK"
+        )
+    else:
+        print(
+            "WARNING: SECTIONが見つかりません"
+        )
+
+    if "EOF" in check_text:
+        print(
+            "EOF: OK"
+        )
+    else:
+        print(
+            "WARNING: EOFが見つかりません"
+        )
+
+except Exception as e:
+
+    print(
+        "保存後検査エラー:",
+        e
+    )
+
+# ============================================================
+# 完了
+# ============================================================
+
+print("")
+print("============================================================")
+print(" 完了")
+print("============================================================")
+print("出力:", output_path)
+print("")
+print("変更内容")
+print("----------------------------")
+print("View            -> 正面図")
+print("ProjItem        -> 側面図")
+print("ProjItem001     -> 側面図2")
+print("Annotation系    -> 注釈")
+print("Dimension系     -> 寸法")
+print("LWPOLYLINE      -> L")
+print("DIMENSION       -> Dimension")
+print("STYLE内 arial.ttf -> msgothic.ttc")
+print("重複LINE        -> 削除")
+print("包含LINE        -> 短い方を削除")
+print("未使用レイヤー  -> 削除しない")
+print("コードページ    -> ANSI_932")
+print("保存形式        -> CP932")
+print("----------------------------")
+print("")
+
+QtWidgets.QMessageBox.information(
+    None,
+    "DXF修正完了",
+    "DXFの修正が完了しました。\n\n"
+    "出力ファイル:\n"
+    + output_path
+)

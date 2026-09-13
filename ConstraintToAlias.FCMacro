@@ -1,0 +1,420 @@
+# ConstraintToAlias, 2023, by <TheMarkster> LGPL 2.1 or later
+# Usage: Create a constraint, give it a name, then run the macro
+# to put a new alias into a spreadsheet and link the constraint
+# to it via Expressions.  If no constraint is selected, then the
+# macro will open the dialog with some default values of "Label"
+# for the label and alias, and 0.0 default value for Value.
+
+__version__ = "0.2023.12.10"
+__icon__ = "https://wiki.freecad.org/images/3/31/ConstraintToAlias.svg"
+
+from PySide import QtGui,QtCore
+import math
+import Sketcher
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+class HighlightDelegate(QtGui.QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        super(HighlightDelegate, self).paint(painter, option, index)
+
+        if index.data(QtCore.Qt.BackgroundRole) == "lightyellow":
+            painter.save()
+            painter.fillRect(option.rect, QtGui.QBrush(QColor("lightyellow")))
+            painter.restore()
+
+        if index.data(QtCore.Qt.BackgroundRole) == "lightblue":
+            painter.save()
+            painter.fillRect(option.rect, QtGui.QBrush(QColor("lightblue")))
+            painter.restore()
+
+class ConstraintToAlias(QtGui.QDialog):
+    def __init__(self, sketch, constraint, spreadsheet, parent=None):
+        super(ConstraintToAlias, self).__init__(parent)
+        self.sketch = sketch
+        self.con = constraint
+        self.spreadsheet = spreadsheet
+        self.setWindowTitle("Alias preview")
+        self.icon = self.QIconFromXPMString(__xpm__)
+        self.aliases = [] #existing aliases in the current spreadsheet
+        self.setWindowIcon(self.icon)
+        self.rowCount = 8
+        self.rowForAlias = 0
+        self.setupUi()
+        if sketch:
+            self.spreadsheet_view.setFocus()
+        else:
+            self.label.setFocus()
+
+
+    def QIconFromXPMString(self, xpm_string):
+        if "/*pixels*/" in xpm_string:
+            xpm = xpm_string.replace("\"","").replace(',','').splitlines()[4:]
+        else:
+            xpm = xpm_string.replace("\"","").replace(',','').splitlines()[3:]
+        for line in reversed(xpm):
+            if line.startswith("/*") and line.endswith("*/"):
+                xpm.pop(xpm.index(line))
+        pixmap = QtGui.QPixmap(xpm)
+        icon = QtGui.QIcon(pixmap)
+        return icon
+
+    def setupUi(self):
+        spreadsheets_label = QtGui.QLabel("Spreadsheets:")
+        self.sheet_box = QtGui.QComboBox()
+        sheets = [obj.Label for obj in FreeCAD.ActiveDocument.Objects if obj.isDerivedFrom("Spreadsheet::Sheet")
+                    or obj.isDerivedFrom("App::Link")
+                    and obj.getLinkedObject().isDerivedFrom("Spreadsheet::Sheet")]
+        self.sheet_box.addItems(sheets)
+        self.sheet_box.setCurrentText(self.Spreadsheet.Label)
+        self.sheet_box.currentIndexChanged.connect(self.onCurrentIndexChanged)
+        self.spreadsheet_view = QtGui.QTableView()
+        self.spreadsheet_view.setItemDelegate(HighlightDelegate())
+        model = QtGui.QStandardItemModel()
+        model.setColumnCount(2)
+        model.setRowCount(8)
+        model.setHorizontalHeaderLabels(["A", "B"])
+        self.spreadsheet_view.setModel(model)
+        self.spreadsheet_view.setMinimumSize(350,450)
+        self.spreadsheet_view.setMaximumHeight(450)
+        horiz_header = self.spreadsheet_view.horizontalHeader()
+        horiz_header.setSectionResizeMode(0, QtGui.QHeaderView.Stretch)
+        horiz_header.setSectionResizeMode(1, QtGui.QHeaderView.Stretch)
+
+        constraint_label = QtGui.QLabel("Label:")
+        self.label = QtGui.QLineEdit()
+        self.label.textChanged.connect(self.onLabelChanged)
+
+        alias_label = QtGui.QLabel("Alias:")
+        self.alias = QtGui.QLineEdit()
+        self.alias.textChanged.connect(self.onAliasChanged)
+
+        value_label = QtGui.QLabel("Value:")
+        self.value = QtGui.QLineEdit()
+        self.value.textChanged.connect(self.onValueChanged)
+
+        # Create layout
+        layout = QtGui.QGridLayout(self)
+        self.setLayout(layout)
+        layout.addWidget(spreadsheets_label, 0, 0)
+        layout.addWidget(self.sheet_box, 0, 1, 1, 3)
+        layout.addWidget(self.spreadsheet_view, 1, 0, self.rowCount, 3)
+        layout.addWidget(constraint_label, self.rowCount + 2, 0)
+        layout.addWidget(self.label, self.rowCount + 2, 1)
+        layout.addWidget(alias_label, self.rowCount + 3, 0)
+        layout.addWidget(self.alias, self.rowCount + 3, 1)
+        layout.addWidget(value_label, self.rowCount + 4, 0)
+        layout.addWidget(self.value, self.rowCount + 4, 1)
+
+        self.label.setText(self.con.Name)
+        self.alias.setText(self.con.Name)
+        self.value.setText(f"{self.con.Value if not con.Type == 'Angle' else math.degrees(self.con.Value)}")
+
+        self.set_cells(FreeCAD.ActiveDocument.getObjectsByLabel(self.sheet_box.currentText())[0])
+        self.set_sheet_read_only()
+        self.adjustSize()
+
+
+        self.button_box = QtGui.QDialogButtonBox(QtGui.QDialogButtonBox.Ok | QtGui.QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        box_layout = QtGui.QHBoxLayout()
+        box_layout.addWidget(self.button_box)
+        layout.addLayout(box_layout, self.rowCount + 5, 0, 1, 3)
+        self.scroll_to_last()
+
+    def update_values(self):
+        """updates the QTableView's alias cells"""
+        self.set_cell_value(self.rowForAlias, 0, self.Label, True, True) #highlight lightblue
+        self.set_cell_value(self.rowForAlias, 1, "{" + self.Alias + "} " + f"{self.Value}", True)
+        self.spreadsheet_view.setSizeAdjustPolicy(QtGui.QTableView.AdjustToContents)
+        if self.Alias in self.aliases:
+            self.alias.setStyleSheet("color:red;")
+            self.alias.setToolTip("Alias already exists in spreadsheet.")
+        else:
+            self.alias.setStyleSheet("color:black;")
+            self.alias.setToolTip("Alias available for use.")
+
+    def onValueChanged(self):
+        self.update_values()
+
+    def onLabelChanged(self):
+        self.update_values()
+
+    def onAliasChanged(self):
+        self.update_values()
+
+    @property
+    def Spreadsheet(self):
+        obj = FreeCAD.ActiveDocument.getObjectsByLabel(self.sheet_box.currentText())[0]
+        if obj.isDerivedFrom("Spreadsheet::Sheet"):
+            return obj
+        else:
+            return obj.getLinkedObject()
+
+    def onCurrentIndexChanged(self, idx):
+        self.spreadsheet = self.Spreadsheet
+        self.set_cells(self.spreadsheet)
+        self.set_sheet_read_only()
+        self.scroll_to_last()
+
+    @property
+    def Label(self):
+        return self.label.text()
+
+    @property
+    def Alias(self):
+        return self.text_to_alias(self.alias.text())
+
+    @property
+    def Value(self):
+        return self.value.text()
+
+    def clear_all_cells(self):
+        model = self.spreadsheet_view.model()
+        if model is not None:
+            rows = model.rowCount()
+            columns = model.columnCount()
+            for row in range(rows):
+                for col in range(columns):
+                    item = model.item(row, col)
+                    if item is not None:
+                        model.setItem(row, col, None)
+
+    def scroll_to_last(self):
+        """scroll to last cell with a value"""
+        model = self.spreadsheet_view.model()
+        self.spreadsheet_view.scrollTo(model.index(self.rowForAlias-1, 0))
+        idx = model.index(self.rowForAlias-1, 0)
+        self.select_cell(self.rowForAlias-1, 0)
+
+    def select_cell(self, row, column):
+        index = self.spreadsheet_view.model().index(row, column)
+        selection_model = self.spreadsheet_view.selectionModel()
+        selection_model.clear()
+        selection_model.select(index, QtCore.QItemSelectionModel.Select)
+
+    def text_to_alias(self, text:str):
+        REPLACEMENTS = {
+            " ": "_",
+            ".": "_",
+            "ä": "ae",
+            "ö": "oe",
+            "ü": "ue",
+            "Ä": "Ae",
+            "Ö": "Oe",
+            "Ü": "Ue",
+            "ß": "ss",
+            "'": ""
+        }
+
+        for character in REPLACEMENTS:
+            text = text.replace(character,REPLACEMENTS.get(character))
+        return text
+
+    def set_cells(self, ss):
+        """set the cells of the sheet view according to the values in the selected sheet"""
+        self.clear_all_cells()
+        self.aliases = []
+        found = False #empty cells found
+        row = 1 #start with A2-B2
+        while not found:
+            row += 1
+            cellAddressA = f"A{row}"
+            cellAddressB = f"B{row}"
+            contentsA = ss.getContents(cellAddressA)
+            contentsB = ss.getContents(cellAddressB)
+            alias = ss.getAlias(cellAddressB)
+            if alias:
+                self.aliases.append(alias)
+            if not contentsA and not contentsB and not alias:
+                found = True
+            else:
+                contentsB = ("{" + alias + "} " + contentsB) if alias else contentsB
+                self.set_cell_value(row, 0, f"{contentsA}")
+                self.set_cell_value(row, 1, f"{contentsB}", bool(alias))
+
+        self.rowForAlias = row
+        self.update_values()
+
+    def set_cell_value(self, row, column, value, highlight=False, blue=False):
+        model = self.spreadsheet_view.model()
+        if model is not None:
+            item = model.item(row-1, column)
+            if item is None:
+                item = QtGui.QStandardItem()
+            # Set the value of the cell
+            item.setText(str(value))
+            model.setItem(row-1, column, item)
+            self.scroll_to_last()
+
+            if highlight:
+                if not blue:
+                    item.setData(QtGui.QBrush(QtGui.QColor("lightyellow")), QtCore.Qt.BackgroundRole)
+                else:
+                    item.setData(QtGui.QBrush(QtGui.QColor("lightblue")), QtCore.Qt.BackgroundRole)
+
+    def set_sheet_read_only(self):
+        model = self.spreadsheet_view.model()
+        if model is not None:
+            rows = model.rowCount()
+            columns = model.columnCount()
+            for row in range(rows):
+                for col in range(columns):
+                    item = model.item(row, col)
+                    if item is not None:
+                        # Make the item read-only
+                        item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
+
+    def add_alias(self, ss, sk, con, row, label, value, alias):
+        if hasattr(ss, alias):
+            print(f"{ss.Label} already has an alias named {alias}, skipping.")
+            return
+
+        cellA = f"A{row}"
+        cellB = f"B{row}"
+        ss.set(cellA, label)
+        ss.set(cellB, f"{value}")
+        ss.setAlias(cellB, alias)
+        if self.get_expression(sk, con):
+            sk.setExpression(f".Constraints.{con.Name}",None)
+            FreeCAD.Console.PrintWarning(f"\
+Warning: alias is set by value, not by expression so as not \
+to create a cyclic redundancy.  The expression for {con.Name} \
+is being cleared and set to {ss.Label}.{con.Name}\n")
+        FreeCAD.ActiveDocument.recompute()
+        if sk:
+            sk.setExpression(f".Constraints.{con.Name}", f"{ss.Name}.{alias}")
+            print(f"\
+Adding alias {alias} from Sketch: {sk.Label} to spreadsheet: {ss.Label} \
+at cell A{row} with value {value}")
+
+    def get_expression(self, sketch, con):
+        """get the current expression for sketch.constraint, if any"""
+        eng = sketch.ExpressionEngine if sketch else []
+        for expr in eng:
+            if f"Constraints.{con.Name}" in expr[0]:
+                return expr[1]
+        return None
+
+    def accept(self):
+        self.add_alias(self.Spreadsheet, self.sketch, self.con, self.rowForAlias, self.Label, self.Value, self.Alias)
+        super().accept()
+
+    def reject(self):
+        #FreeCAD.Console.PrintMessage("User canceled\n")
+        super().reject()
+
+__xpm__="""
+/* XPM */
+static char *dummy[]={
+"64 64 4 1",
+"b c #019eff",
+"# c #8b0000",
+"a c #ff0000",
+". c None",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"........########................................................",
+".......#aaaaaaaa#...............................................",
+"......#aaaaaaaaaa#..............................................",
+"....#..#aaaaaaaaa#..............................................",
+"...#a#..###aaaaaa#..............................................",
+"..#aaa#...aaaaaaa#..............................................",
+"..#aaa#..aaaaaaaa#..............................................",
+"..#aaa#.aaaaa#aaa#..............................................",
+"..#aaa#aaaaa.#aaa#..............................................",
+"..#aaaaaaaa..#aaa#..............................................",
+"..#aaaaaaa....#a#...............................................",
+"..#aaaaaa####..#.....................#####...#.......####...#...",
+"..#aaaaaaaaaa#......................#bbbbb###b#....##bbbb###b#..",
+"..#aaaaaaaaaaa#........#..........#bbbbbbbbbbbb#.#bbbbbbbbbbbb#.",
+"...#aaaaaaaaa#........#aa........#bbbbbbbbbbbbb#.bbbbbbbbbbbbb#.",
+"....#########........#aaaa.......#bbbb####bbbbb##bbbb####bbbbb#.",
+"......................aaaaa......#bbb###.##bbbb##bbbb##.##bbbb#.",
+".......................aaaaa.....#bbbbbb###bbbb##bbbbbb##.#bbb#.",
+"..............##########aaaaa....#bbbbbbbb###b#..bbbbbbbb###b#..",
+".............#aaaaaaaaaaaaaaaa....#bbbbbbbbb##...#bbbbbbbbbb#...",
+"............#aaaaaaaaaaaaaaaaa#....##bbbbbbbb##...##bbbbbbbbb#..",
+".............#aaaaaaaaaaaaaaaa....#b###bbbbbbb#..#b###bbbbbbbb..",
+"..............##########aaaaa....#bbb#..##bbbbb##bbb#..##bbbbb#.",
+".......................aaaaa.....#bbb#....##bbb##bbbb#...##bbb#.",
+"......................aaaaa......#bbbb#####bbbb##bbbbb####bbbb#.",
+".....................#aaaa.......#bbbbbbbbbbbb#.#bbbbbbbbbbbbb..",
+"...............#......#aa........#bbbbbbbbbbb##.#bbbbbbbbbbbb#..",
+"..............aa#......#..........#b##bbbbb###...#b##bbbbbb##...",
+".............aaaa#.................#.#######......#..######.....",
+"............aaaaa...............................................",
+"..........#aaaaa................................................",
+".........#aaaaa.................................................",
+"........#aaaaa..................................................",
+"........aaaaaa..................................................",
+".......aaaaaaa#.................................................",
+"......aaaaaaaaa.................................................",
+".....aaaaa.aaaa#................................................",
+"....aaaaa###aaa#####............................................",
+"...aaaaaaaaaaaaaaaaa#...........................................",
+"..#aaaaaaaaaaaaaaaaaa#..........................................",
+"...#aaaaaaaaaaaaaaaa#...........................................",
+"....################............................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................"};
+"""
+
+mw = Gui.getMainWindow()
+spreadsheets = [obj for obj in FreeCAD.ActiveDocument.Objects if obj.isDerivedFrom("Spreadsheet::Sheet")]
+links = [obj.getLinkedObject() for obj in FreeCAD.ActiveDocument.Objects if obj.isDerivedFrom("App::Link") and obj.getLinkedObject().isDerivedFrom("Spreadsheet::Sheet")]
+for link in links:
+    if not link in spreadsheets:
+        spreadsheets.append(link)
+ss = None
+if len(spreadsheets) == 1:
+    ss = spreadsheets[0]
+elif len(spreadsheets) == 0:
+    ss = FreeCAD.ActiveDocument.addObject("Spreadsheet::Sheet","ss")
+    FreeCAD.ActiveDocument.recompute()
+    FreeCAD.Console.PrintMessage(f"A new spreadsheet named {ss.Name} has been created.\n")
+
+sel = Gui.Selection.getCompleteSelection()
+con = None
+for s in sel:
+    sk = s.Object
+    if not sk.isDerivedFrom("Sketcher::SketchObject"):
+        continue
+    if not "Constraint" in s.SubElementNames[0]:
+        continue
+    conString = s.SubElementNames[0].replace("Constraint","")
+    conIdx = int(conString) - 1
+    con = sk.Constraints[conIdx]
+    if not con.Name:
+        continue
+    dlg = ConstraintToAlias(sk,con,ss,mw)
+    dlg.exec_()
+
+if not con: #no constraint selected, so create generic alias options
+    con = Sketcher.Constraint()
+    con.Name = "Label"
+    dlg = ConstraintToAlias(None,con,ss,mw)
+    ii = 1
+    while hasattr(ss,f"Alias{ii}"):
+        ii += 1
+    dlg.alias.setText(f"Alias{ii}")
+    dlg.exec_()

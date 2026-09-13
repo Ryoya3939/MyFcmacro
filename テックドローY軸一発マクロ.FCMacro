@@ -1,0 +1,443 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+
+doc = App.ActiveDocument
+
+print("========================================")
+print(" TechDraw Y座標 自動寸法")
+print("========================================")
+
+TOL = 0.000001
+
+# ============================================================
+# 1. 選択確認
+# ============================================================
+
+sel = Gui.Selection.getSelectionEx()
+
+if len(sel) != 1:
+    raise Exception("TechDrawの頂点を1個だけ選択してください。")
+
+s = sel[0]
+view = s.Object
+
+if len(s.SubElementNames) != 1:
+    raise Exception("頂点を1個だけ選択してください。")
+
+subname = s.SubElementNames[0]
+
+if not subname.startswith("Vertex"):
+    raise Exception("Vertexを選択してください。")
+
+print("View :", view.Name)
+print("Label:", view.Label)
+print("Selected:", subname)
+
+# ============================================================
+# 2. 選択されたVertexを取得
+# ============================================================
+
+base_v = view.getVertexBySelection(subname)
+
+if base_v is None:
+    raise Exception("選択Vertexを取得できませんでした。")
+
+base_p = base_v.Point
+
+print("")
+print("基準点")
+print("X =", base_p.x)
+print("Y =", base_p.y)
+
+# ============================================================
+# 3. View内の円情報を先に取得
+#    円周上のVertexを除外するため
+# ============================================================
+
+circles = []
+
+for i in range(10000):
+
+    try:
+        edge = view.getEdgeByIndex(i)
+
+    except:
+        break
+
+    if edge is None:
+        continue
+
+    try:
+        curve = edge.Curve
+
+    except:
+        continue
+
+    if isinstance(curve, Part.Circle):
+
+        c = curve.Center
+
+        circles.append({
+            "type": "Circle",
+            "index": i,
+            "x": c.x,
+            "y": c.y,
+            "radius": curve.Radius
+        })
+
+    elif isinstance(curve, Part.ArcOfCircle):
+
+        c = curve.Center
+
+        circles.append({
+            "type": "Arc",
+            "index": i,
+            "x": c.x,
+            "y": c.y,
+            "radius": curve.Radius
+        })
+
+print("")
+print("円/円弧数:", len(circles))
+
+# ============================================================
+# 4. View内の全Vertexを取得
+#    円周上のVertexは除外
+# ============================================================
+
+points = []
+
+vertex_count = 0
+excluded_circle_vertices = 0
+
+for i in range(10000):
+
+    try:
+        vx = view.getVertexByIndex(i)
+
+    except:
+        break
+
+    if vx is None:
+        continue
+
+    p = vx.Point
+
+    # --------------------------------------------------------
+    # 円周上のVertexか判定
+    # --------------------------------------------------------
+
+    on_circle = False
+
+    for circle in circles:
+
+        dx = p.x - circle["x"]
+        dy = p.y - circle["y"]
+
+        distance = (dx * dx + dy * dy) ** 0.5
+
+        if abs(distance - circle["radius"]) <= TOL:
+
+            on_circle = True
+            break
+
+    if on_circle:
+
+        excluded_circle_vertices += 1
+
+        print(
+            "円周Vertex除外:",
+            "Vertex%d" % i,
+            "X=%.6f Y=%.6f" % (p.x, p.y)
+        )
+
+        continue
+
+    points.append({
+        "type": "Vertex",
+        "index": i,
+        "x": p.x,
+        "y": p.y,
+        "ref": "Vertex%d" % i
+    })
+
+    vertex_count += 1
+
+# ============================================================
+# 5. View内の全Edgeから
+#    Circle / ArcOfCircle の中心を取得
+# ============================================================
+
+edge_count = 0
+
+for i in range(10000):
+
+    try:
+        edge = view.getEdgeByIndex(i)
+
+    except:
+        break
+
+    if edge is None:
+        continue
+
+    edge_count += 1
+
+    try:
+        curve = edge.Curve
+
+    except:
+        continue
+
+    if isinstance(curve, Part.Circle):
+
+        c = curve.Center
+
+        points.append({
+            "type": "CircleCenter",
+            "index": i,
+            "x": c.x,
+            "y": c.y,
+            "ref": "Edge%d" % i
+        })
+
+    elif isinstance(curve, Part.ArcOfCircle):
+
+        c = curve.Center
+
+        points.append({
+            "type": "ArcCenter",
+            "index": i,
+            "x": c.x,
+            "y": c.y,
+            "ref": "Edge%d" % i
+        })
+
+print("")
+print("取得Vertex          :", vertex_count)
+print("円周Vertex除外      :", excluded_circle_vertices)
+print("取得Edge            :", edge_count)
+print("取得点総数          :", len(points))
+
+# ============================================================
+# 6. Y座標だけで重複除去
+# ============================================================
+
+unique = []
+
+for pt in points:
+
+    same_y = False
+
+    for old in unique:
+
+        if abs(pt["y"] - old["y"]) <= TOL:
+
+            same_y = True
+            break
+
+    if not same_y:
+        unique.append(pt)
+
+print("Y重複除去後:", len(unique))
+
+# ============================================================
+# 7. 基準点からY方向の距離を計算
+# ============================================================
+
+targets = []
+
+for pt in unique:
+
+    dy = abs(pt["y"] - base_p.y)
+
+    # 基準Yそのものは寸法不要
+    if dy <= TOL:
+        continue
+
+    item = dict(pt)
+    item["dy"] = dy
+
+    targets.append(item)
+
+# ============================================================
+# 8. 近い順に並べる
+# ============================================================
+
+targets.sort(key=lambda x: x["dy"])
+
+print("")
+print("========================================")
+print(" 寸法作成順")
+print("========================================")
+
+for n, pt in enumerate(targets):
+
+    print(
+        "%02d  DY=%10.4f  X=%10.4f  Y=%10.4f  %s"
+        % (
+            n + 1,
+            pt["dy"],
+            pt["x"],
+            pt["y"],
+            pt["type"]
+        )
+    )
+
+# ============================================================
+# 9. Pageを取得
+# ============================================================
+
+page = None
+
+for obj in doc.Objects:
+
+    if obj.TypeId == "TechDraw::DrawPage":
+
+        page = obj
+
+        break
+
+if page is None:
+    raise Exception("TechDraw Pageが見つかりません。")
+
+print("")
+print("Page:", page.Name)
+
+# ============================================================
+# 10. 寸法作成
+# ============================================================
+
+created = []
+
+for n, pt in enumerate(targets):
+
+    try:
+
+        dim = doc.addObject(
+            "TechDraw::DrawViewDimension",
+            "AutoDistanceY%03d" % (n + 1)
+        )
+
+        dim.Label = "DistanceY_%03d" % (n + 1)
+
+        dim.Type = "DistanceY"
+
+        # ----------------------------------------------------
+        # 基準点と対象点のReferences2D
+        # ----------------------------------------------------
+
+        dim.References2D = [
+            (
+                view,
+                (
+                    subname,
+                    pt["ref"]
+                )
+            )
+        ]
+
+        # ----------------------------------------------------
+        # 寸法位置
+        # ----------------------------------------------------
+
+        dim.X = base_p.x - 10.0 - (n * 5.0)
+
+        dim.Y = (base_p.y + pt["y"]) / 2.0
+
+        # ----------------------------------------------------
+        # Pageへ正規の方法で追加
+        # page.Viewsを直接書き換えない
+        # ----------------------------------------------------
+
+        result = page.addView(dim)
+
+        print(
+            "page.addView() 結果:",
+            result
+        )
+
+        created.append(dim)
+
+        print(
+            "作成:",
+            dim.Name,
+            "Y=",
+            pt["y"],
+            "DY=",
+            pt["dy"]
+        )
+
+    except Exception as e:
+
+        print(
+            "寸法作成失敗:",
+            n + 1,
+            pt["type"],
+            pt["y"],
+            str(e)
+        )
+
+# ============================================================
+# 11. 再計算
+# ============================================================
+
+doc.recompute()
+
+# ============================================================
+# 12. 作成後の確認
+# ============================================================
+
+print("")
+print("========================================")
+print(" 作成後確認")
+print("========================================")
+
+print("")
+print("Page.Views:")
+
+for x in page.Views:
+
+    print(
+        " ",
+        x.Name,
+        x.TypeId
+    )
+
+print("")
+print("View.claimChildren():")
+
+try:
+
+    children = view.ViewObject.claimChildren()
+
+    for x in children:
+
+        print(
+            " ",
+            x.Name,
+            x.Label,
+            x.TypeId
+        )
+
+except Exception as e:
+
+    print(
+        "claimChildren取得失敗:",
+        e
+    )
+
+# ============================================================
+# 13. 完了
+# ============================================================
+
+print("")
+print("========================================")
+print(" 完了")
+print("========================================")
+print("基準Y              :", base_p.y)
+print("円周Vertex除外数   :", excluded_circle_vertices)
+print("対象Y数            :", len(targets))
+print("作成寸法数         :", len(created))
+print("========================================")

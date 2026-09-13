@@ -1,0 +1,236 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import Draft
+import math
+from PySide import QtCore, QtWidgets
+
+class NewJisRoughnessContinuousTool(QtWidgets.QDialog):
+    def __init__(self):
+        super(NewJisRoughnessContinuousTool, self).__init__(Gui.getMainWindow())
+        self.setWindowTitle("新JIS表面粗さ指示（連続作成版）")
+        self.resize(340, 580)  # ボタンが増えたので高さを広げました
+        self.callback_id = None
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+
+        # 1. 加工方法のモード切替
+        layout.addWidget(QtWidgets.QLabel("加工モードの選択:", self))
+        self.combo_mode = QtWidgets.QComboBox(self)
+        self.combo_mode.addItems([
+            "除去加工あり（3辺が閉じた三角形）", 
+            "指示なし（上の線なし）", 
+            "除去加工なし（中心に丸を追加）"
+        ])
+        self.combo_mode.setCurrentIndex(0)
+        layout.addWidget(self.combo_mode)
+
+        # 2. 加工方法の付記を選択
+        layout.addWidget(QtWidgets.QLabel("加工方法の付記:", self))
+        self.combo_process = QtWidgets.QComboBox(self)
+        self.combo_process.addItems([
+            "なし", "フライス", "リーマー", "ドリル", "旋盤", "ボーリング", "グラインダー"
+        ])
+        self.combo_process.setCurrentText("なし")
+        layout.addWidget(self.combo_process)
+
+        # 3. 三角形のサイズ
+        layout.addWidget(QtWidgets.QLabel("三角形の1辺の長さ (mm):", self))
+        self.txt_base = QtWidgets.QLineEdit(self)
+        self.txt_base.setText("1.0")
+        layout.addWidget(self.txt_base)
+
+        # 4. 折れ曲がり横線の長さ
+        layout.addWidget(QtWidgets.QLabel("折れ曲がり横線の長さ (mm):", self))
+        self.txt_hlen = QtWidgets.QLineEdit(self)
+        self.txt_hlen.setText("6.0")
+        layout.addWidget(self.txt_hlen)
+
+        # 5. 文字の大きさ (フォントサイズ)
+        layout.addWidget(QtWidgets.QLabel("文字の大きさ (FontSize):", self))
+        self.txt_font_size = QtWidgets.QLineEdit(self)
+        self.txt_font_size.setText("1.0")
+        layout.addWidget(self.txt_font_size)
+
+        # 6. Raの値を選択するプルダウン
+        layout.addWidget(QtWidgets.QLabel("Raの値を選択:", self))
+        self.combo_ra = QtWidgets.QComboBox(self)
+        self.combo_ra.addItems(["Ra0.2", "Ra0.4", "Ra0.8", "Ra1.6", "Ra3.2", "Ra6.4"])
+        self.combo_ra.setCurrentText("Ra1.6")
+        layout.addWidget(self.combo_ra)
+
+        # 7. 表示カラー
+        layout.addWidget(QtWidgets.QLabel("表示カラー:", self))
+        self.combo_color = QtWidgets.QComboBox(self)
+        self.combo_color.addItems(["緑色", "赤色", "青色", "黒色", "白色"])
+        layout.addWidget(self.combo_color)
+
+        layout.addSpacing(10)
+
+        # 8. 作成開始ボタン
+        self.btn_run = QtWidgets.QPushButton("連続作成を開始", self)
+        self.btn_run.setStyleSheet("font-weight: bold; height: 35px; background-color: #2b579a; color: white;")
+        self.btn_run.clicked.connect(self.start_spatial_click_mode)
+        layout.addWidget(self.btn_run)
+        
+        # 【新機能】9. 連続作成を終了するボタン
+        self.btn_stop = QtWidgets.QPushButton("連続作成を終了して閉じる", self)
+        self.btn_stop.setStyleSheet("font-weight: bold; height: 35px; background-color: #a20025; color: white;")
+        self.btn_stop.clicked.connect(self.close_tool)
+        self.btn_stop.setEnabled(False) # 最初は無効化
+        layout.addWidget(self.btn_stop)
+        
+        self.lbl_status = QtWidgets.QLabel("※「開始」を押すと、画面クリックで何個でも作れます", self)
+        self.lbl_status.setStyleSheet("color: blue; font-weight: bold;")
+        layout.addWidget(self.lbl_status)
+
+    def start_spatial_click_mode(self):
+        # 押した瞬間のUI設定値を毎回ロックせず、リアルタイムに読み込めるように
+        # クリックイベント（popup_at_click）側でテキストボックスから値を取得するように変更しました
+        
+        if self.callback_id is None:
+            self.view = Gui.ActiveDocument.ActiveView
+            self.callback_id = self.view.addEventCallback("SoMouseButtonEvent", self.popup_at_click)
+            
+        self.btn_run.setEnabled(False)
+        self.btn_stop.setEnabled(True) # 終了ボタンを押せるようにする
+        self.btn_run.setText("連続作成モード中...")
+        self.lbl_status.setText("状態: クリックで連続作成できます。終了時は赤ボタンを")
+
+    def popup_at_click(self, dictionary):
+        # 左ボタンが押された瞬間（DOWN）
+        if dictionary["State"] == "DOWN" and dictionary["Button"] == "BUTTON1":
+            
+            # 【重要】ここではremoveEventCallbackをせず、監視を維持します！
+            
+            # リアルタイムに入力欄の数値や設定を読み込む
+            try:
+                size = float(self.txt_base.text())
+                horizontal_len = float(self.txt_hlen.text())
+                font_size = float(self.txt_font_size.text())
+            except ValueError:
+                return # 数値が不正な場合は無視して次のクリックを待つ
+
+            mode_index = self.combo_mode.currentIndex()
+            process_text = self.combo_process.currentText()
+            ra_text = self.combo_ra.currentText()
+            
+            color_name = self.combo_color.currentText()
+            if color_name == "赤色": my_color = (1.0, 0.0, 0.0, 1.0)
+            elif color_name == "青色": my_color = (0.0, 0.0, 1.0, 1.0)
+            elif color_name == "黒色": my_color = (0.0, 0.0, 0.0, 1.0)
+            elif color_name == "白色": my_color = (1.0, 1.0, 1.0, 1.0)
+            else: my_color = (0.0, 1.0, 0.0, 1.0)
+
+            pos_x = dictionary["Position"]
+            pos_y = dictionary["Position"]
+            p_click = self.view.getPoint(pos_x, pos_y)
+
+            if not p_click:
+                return
+
+            cx, cy, cz = p_click.x, p_click.y, p_click.z
+            doc = App.ActiveDocument if App.ActiveDocument else App.newDocument("NewJISRoughness")
+
+            # 幾何学計算
+            ext = size * 1.0
+            r = size / math.sqrt(3.0)
+            
+            p1 = App.Vector(cx, cy, cz)
+            p2 = App.Vector(cx + size / 2.0, cy + r * 1.5, cz)
+            p3 = App.Vector(cx - size / 2.0, cy + r * 1.5, cz)
+
+            p2_extended = App.Vector(
+                p2.x + (size / 2.0) * (ext / size),
+                p2.y + (r * 1.5) * (ext / size), 
+                cz
+            )
+            p_horizontal_end = App.Vector(p2_extended.x + horizontal_len, p2_extended.y, cz)
+
+            # エッジの構成
+            edges = []
+            edges.append(Part.makeLine(p3, p1))
+            edges.append(Part.makeLine(p1, p2_extended))
+            edges.append(Part.makeLine(p2_extended, p_horizontal_end))
+
+            if mode_index == 0:
+                edges.append(Part.makeLine(p2, p3))
+            elif mode_index == 1:
+                pass
+            elif mode_index == 2:
+                edges.append(Part.makeLine(p2, p3))
+                center_y = cy + r
+                circle_radius = r / 2.0
+                circle_shape = Part.makeCircle(circle_radius, App.Vector(cx, center_y, cz), App.Vector(0, 0, 1))
+                edges.append(circle_shape)
+
+            compound = Part.makeCompound(edges)
+            obj = doc.addObject("Part::Feature", f"NewJIS_{ra_text}_▽")
+            obj.Shape = compound
+            
+            if hasattr(obj, "ViewObject") and obj.ViewObject:
+                obj.ViewObject.LineWidth = 1.5
+                obj.ViewObject.LineColor = my_color
+
+            # 【下側：Raテキスト】
+            tx = p2_extended.x + 1.0
+            ty_ra = p2_extended.y - font_size - 0.8
+            
+            text_ra_obj = Draft.make_text(
+                string=ra_text,
+                placement=App.Placement(App.Vector(tx, ty_ra, cz), App.Rotation(0.0, 0.0, 0.0, 1.0))
+            )
+            if hasattr(text_ra_obj, "ViewObject") and text_ra_obj.ViewObject:
+                text_ra_obj.ViewObject.TextColor = my_color
+                text_ra_obj.ViewObject.FontSize = font_size
+            Draft.autogroup(text_ra_obj)
+
+            # 【上側：加工方法テキスト】
+            text_proc_obj = None
+            if process_text != "none" and process_text != "なし":
+                ty_proc = p2_extended.y + 0.8
+                text_proc_obj = Draft.make_text(
+                    string=process_text,
+                    placement=App.Placement(App.Vector(tx, ty_proc, cz), App.Rotation(0.0, 0.0, 0.0, 1.0))
+                )
+                if hasattr(text_proc_obj, "ViewObject") and text_proc_obj.ViewObject:
+                    text_proc_obj.ViewObject.TextColor = my_color
+                    text_proc_obj.ViewObject.FontSize = font_size
+                Draft.autogroup(text_proc_obj)
+
+            # ドットの色連動
+            targets = [text_ra_obj]
+            if text_proc_obj:
+                targets.append(text_proc_obj)
+                
+            for t_obj in targets:
+                if hasattr(t_obj, "ViewObject") and t_obj.ViewObject:
+                    if hasattr(t_obj.ViewObject, "MarkerColor"):
+                        t_obj.ViewObject.MarkerColor = my_color
+                    if hasattr(t_obj.ViewObject, "PointColor"):
+                        t_obj.ViewObject.PointColor = my_color
+
+            Draft.autogroup(obj)
+            doc.recompute()
+            Gui.updateGui()
+            # 💡 画面を閉じずに、次のクリックへ進みます！
+
+    def close_tool(self):
+        """ 赤ボタンが押された時の処理 """
+        self.close()
+
+    def closeEvent(self, event):
+        # 画面が閉じられる時は（終了ボタンでも×ボタンでも）確実に監視を解除する
+        if self.callback_id is not None:
+            self.view.removeEventCallback("SoMouseButtonEvent", self.callback_id)
+            self.callback_id = None
+        event.accept()
+
+def launch_gui():
+    global current_dialog
+    current_dialog = NewJisRoughnessContinuousTool()
+    current_dialog.show()
+
+launch_gui()

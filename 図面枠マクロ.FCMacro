@@ -1,0 +1,195 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import Draft
+import math
+from PySide import QtCore, QtWidgets
+
+class DrawingFrameGeneratorOnlyTool(QtWidgets.QDialog):
+    def __init__(self):
+        super(DrawingFrameGeneratorOnlyTool, self).__init__(Gui.getMainWindow())
+        self.setWindowTitle("JIS規格 図面枠作成（中心線付き）")
+        self.resize(340, 420)
+        self.callback_id = None
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+
+        # 1. 用紙サイズの選択
+        layout.addWidget(QtWidgets.QLabel("用紙サイズ:", self))
+        self.combo_size = QtWidgets.QComboBox(self)
+        self.combo_size.addItems(["A3 (420 x 297)", "A4 (297 x 210)"])
+        self.combo_size.setCurrentIndex(0)
+        layout.addWidget(self.combo_size)
+
+        # 2. 用紙の向き
+        layout.addWidget(QtWidgets.QLabel("用紙の向き:", self))
+        self.combo_orient = QtWidgets.QComboBox(self)
+        self.combo_orient.addItems(["横向き (Horizontal)", "縦向き (Vertical)"])
+        self.combo_orient.setCurrentIndex(0)
+        layout.addWidget(self.combo_orient)
+
+        # 3. 輪郭線の余白
+        layout.addWidget(QtWidgets.QLabel("内枠(輪郭線)の余白幅 (mm):", self))
+        self.combo_margin = QtWidgets.QComboBox(self)
+        self.combo_margin.addItems(["10.0", "5.0"])
+        self.combo_margin.setCurrentText("10.0")
+        layout.addWidget(self.combo_margin)
+
+        # 4. 外枠の線の太さ
+        layout.addWidget(QtWidgets.QLabel("外枠の線の太さ (JISは太線推奨):", self))
+        self.txt_outer_width = QtWidgets.QLineEdit(self)
+        self.txt_outer_width.setText("2.0")
+        layout.addWidget(self.txt_outer_width)
+
+        # 5. 内枠（輪郭線）の線の太さ
+        layout.addWidget(QtWidgets.QLabel("内枠の線の太さ (JISは細線推奨):", self))
+        self.txt_inner_width = QtWidgets.QLineEdit(self)
+        self.txt_inner_width.setText("1.0")
+        layout.addWidget(self.txt_inner_width)
+
+        # 6. 表示カラー
+        layout.addWidget(QtWidgets.QLabel("表示カラー:", self))
+        self.combo_color = QtWidgets.QComboBox(self)
+        self.combo_color.addItems(["黒色（図面標準）", "緑色", "赤色", "青色", "白色"])
+        self.combo_color.setCurrentText("黒色（図面標準）")
+        layout.addWidget(self.combo_color)
+
+        layout.addSpacing(15)
+
+        # 7. 実行ボタン
+        self.btn_run = QtWidgets.QPushButton("クリック位置に図面枠を作成", self)
+        self.btn_run.setStyleSheet("font-weight: bold; height: 35px; background-color: #2b579a; color: white;")
+        self.btn_run.clicked.connect(self.start_spatial_click_mode)
+        layout.addWidget(self.btn_run)
+        
+        self.lbl_status = QtWidgets.QLabel("※ボタンを押した後、左下基準点にしたい場所をクリック", self)
+        self.lbl_status.setStyleSheet("color: blue; font-weight: bold;")
+        layout.addWidget(self.lbl_status)
+
+    def start_spatial_click_mode(self):
+        try:
+            self.outer_w = float(self.txt_outer_width.text())
+            self.inner_w = float(self.txt_inner_width.text())
+            self.margin = float(self.combo_margin.currentText())
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "エラー", "数値を入れてください。")
+            return
+            
+        self.size_idx = self.combo_size.currentIndex()
+        self.orient_idx = self.combo_orient.currentIndex()
+        
+        color_name = self.combo_color.currentText()
+        if color_name == "赤色": self.my_color = (1.0, 0.0, 0.0, 1.0)
+        elif color_name == "青色": self.my_color = (0.0, 0.0, 1.0, 1.0)
+        elif color_name == "白色": self.my_color = (1.0, 1.0, 1.0, 1.0)
+        elif color_name == "緑色": self.my_color = (0.0, 1.0, 0.0, 1.0)
+        else: self.my_color = (0.0, 0.0, 0.0, 1.0)
+
+        if self.callback_id is None:
+            self.view = Gui.ActiveDocument.ActiveView
+            self.callback_id = self.view.addEventCallback("SoMouseButtonEvent", self.popup_at_click)
+            
+        self.btn_run.setEnabled(False)
+        self.btn_run.setText("3D画面をクリックしてください...")
+        self.lbl_status.setText("状態: 空間クリック待ちです")
+
+    def popup_at_click(self, dictionary):
+        if dictionary["State"] == "DOWN" and dictionary["Button"] == "BUTTON1":
+            
+            if self.callback_id is not None:
+                self.view.removeEventCallback("SoMouseButtonEvent", self.callback_id)
+                self.callback_id = None
+
+            pos_x = dictionary["Position"]
+            pos_y = dictionary["Position"]
+            p_click = self.view.getPoint(pos_x, pos_y)
+
+            if not p_click:
+                return
+
+            cx, cy, cz = p_click.x, p_click.y, p_click.z
+            doc = App.ActiveDocument if App.ActiveDocument else App.newDocument("JIS_DrawingFrame")
+
+            if self.size_idx == 0: # A3
+                w_raw, h_raw = 420.0, 297.0
+            else: # A4
+                w_raw, h_raw = 297.0, 210.0
+
+            if self.orient_idx == 0: # 横向き
+                paper_w, paper_h = w_raw, h_raw
+            else: # 縦向き
+                paper_w, paper_h = h_raw, w_raw
+
+            # 外枠
+            o_p1 = App.Vector(cx, cy, cz)
+            o_p2 = App.Vector(cx + paper_w, cy, cz)
+            o_p3 = App.Vector(cx + paper_w, cy + paper_h, cz)
+            o_p4 = App.Vector(cx, cy + paper_h, cz)
+            outer_edges = [
+                Part.makeLine(o_p1, o_p2), Part.makeLine(o_p2, o_p3),
+                Part.makeLine(o_p3, o_p4), Part.makeLine(o_p4, o_p1)
+            ]
+            outer_compound = Part.makeCompound(outer_edges)
+            outer_obj = doc.addObject("Part::Feature", "JIS_OuterFrame_外枠")
+            outer_obj.Shape = outer_compound
+
+            # 内枠
+            m = self.margin
+            i_p1 = App.Vector(cx + m, cy + m, cz)
+            i_p2 = App.Vector(cx + paper_w - m, cy + m, cz)
+            i_p3 = App.Vector(cx + paper_w - m, cy + paper_h - m, cz)
+            i_p4 = App.Vector(cx + m, cy + paper_h - m, cz)
+            inner_edges = [
+                Part.makeLine(i_p1, i_p2), Part.makeLine(i_p2, i_p3),
+                Part.makeLine(i_p3, i_p4), Part.makeLine(i_p4, i_p1)
+            ]
+            inner_compound = Part.makeCompound(inner_edges)
+            inner_obj = doc.addObject("Part::Feature", "JIS_InnerFrame_輪郭線")
+            inner_obj.Shape = inner_compound
+
+            # 中心線（4箇所・10mm突入）
+            center_edges = []
+            mid_x = cx + paper_w / 2.0
+            mid_y = cy + paper_h / 2.0
+            ext_len = 10.0
+            center_edges.append(Part.makeLine(App.Vector(mid_x, cy, cz), App.Vector(mid_x, cy + m + ext_len, cz)))
+            center_edges.append(Part.makeLine(App.Vector(mid_x, cy + paper_h, cz), App.Vector(mid_x, cy + paper_h - m - ext_len, cz)))
+            center_edges.append(Part.makeLine(App.Vector(cx, mid_y, cz), App.Vector(cx + m + ext_len, mid_y, cz)))
+            center_edges.append(Part.makeLine(App.Vector(cx + paper_w, mid_y, cz), App.Vector(cx + paper_w - m - ext_len, mid_y, cz)))
+            center_compound = Part.makeCompound(center_edges)
+            center_obj = doc.addObject("Part::Feature", "JIS_CenterMarks_中心線")
+            center_obj.Shape = center_compound
+
+            # 見た目
+            if hasattr(outer_obj, "ViewObject") and outer_obj.ViewObject:
+                outer_obj.ViewObject.LineWidth = self.outer_w
+                outer_obj.ViewObject.LineColor = self.my_color
+            if hasattr(inner_obj, "ViewObject") and inner_obj.ViewObject:
+                inner_obj.ViewObject.LineWidth = self.inner_w
+                inner_obj.ViewObject.LineColor = self.my_color
+            if hasattr(center_obj, "ViewObject") and center_obj.ViewObject:
+                center_obj.ViewObject.LineWidth = self.inner_w
+                center_obj.ViewObject.LineColor = self.my_color
+
+            Draft.autogroup(outer_obj)
+            Draft.autogroup(inner_obj)
+            Draft.autogroup(center_obj)
+
+            doc.recompute()
+            Gui.updateGui()
+            self.close()
+
+    def closeEvent(self, event):
+        if self.callback_id is not None:
+            self.view.removeEventCallback("SoMouseButtonEvent", self.callback_id)
+            self.callback_id = None
+        event.accept()
+
+def launch_gui():
+    global current_dialog
+    current_dialog = DrawingFrameGeneratorOnlyTool()
+    current_dialog.show()
+
+launch_gui()

@@ -1,0 +1,10 @@
+import FreeCAD as APP
+import FreeCADGui as Gui
+import Part
+import Draft
+
+sel = Gui.Selection.getSelectionEx()
+
+for obj in sel:
+    for sub in obj.SubObjects:
+        print(sub)

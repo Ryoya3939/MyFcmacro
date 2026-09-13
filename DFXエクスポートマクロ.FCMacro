@@ -1,0 +1,522 @@
+import os
+import FreeCAD as App
+import TechDraw
+import ezdxf
+
+from PySide import QtWidgets, QtCore
+
+
+# ============================================================
+# 設定
+# ============================================================
+
+TOL = 0.001
+
+
+# ============================================================
+# FreeCADドキュメント
+# ============================================================
+
+doc = App.ActiveDocument
+
+if doc is None:
+    QtWidgets.QMessageBox.critical(
+        None,
+        "DXF出力エラー",
+        "アクティブなFreeCADドキュメントがありません。"
+    )
+    raise Exception("ActiveDocumentがありません")
+
+
+# ============================================================
+# TechDraw Page取得
+# ============================================================
+
+page = None
+
+for obj in doc.Objects:
+    if obj.TypeId == "TechDraw::DrawPage":
+        page = obj
+        break
+
+if page is None:
+    QtWidgets.QMessageBox.critical(
+        None,
+        "DXF出力エラー",
+        "TechDrawのページが見つかりません。"
+    )
+    raise Exception("TechDraw Pageがありません")
+
+
+# ============================================================
+# デスクトップ
+# ============================================================
+
+desktop = QtCore.QStandardPaths.writableLocation(
+    QtCore.QStandardPaths.DesktopLocation
+)
+
+if not desktop or not os.path.exists(desktop):
+    desktop = os.path.expanduser("~")
+
+
+# ============================================================
+# 保存先
+# ============================================================
+
+filename, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+    None,
+    "DXF保存",
+    os.path.join(
+        desktop,
+        doc.Label + ".dxf"
+    ),
+    "DXF Files (*.dxf)"
+)
+
+if not filename:
+    QtWidgets.QMessageBox.information(
+        None,
+        "DXF出力",
+        "保存をキャンセルしました。"
+    )
+    raise Exception("保存キャンセル")
+
+if not filename.lower().endswith(".dxf"):
+    filename += ".dxf"
+
+
+# ============================================================
+# 一時DXF
+# ============================================================
+
+temp_file = os.path.join(
+    desktop,
+    "_TechDraw_temp_export.dxf"
+)
+
+
+print("========================================")
+print("TechDraw → ezdxf DXF")
+print("========================================")
+print("Page :", page.Name)
+print("保存先:", filename)
+
+
+# ============================================================
+# 1. TechDraw純正DXF
+# ============================================================
+
+print("")
+print("① TechDraw DXF作成中...")
+
+TechDraw.writeDXFPage(
+    page,
+    temp_file
+)
+
+if not os.path.exists(temp_file):
+    raise Exception(
+        "TechDraw DXFが作成されませんでした"
+    )
+
+print(
+    "作成完了:",
+    os.path.getsize(temp_file),
+    "bytes"
+)
+
+
+# ============================================================
+# 2. ezdxf読み込み
+# ============================================================
+
+print("")
+print("② ezdxf読み込み中...")
+
+dxf = ezdxf.readfile(temp_file)
+msp = dxf.modelspace()
+
+print(
+    "エンティティ数:",
+    len(msp)
+)
+
+
+# ============================================================
+# 3. 日本語文字化け修正
+# ============================================================
+
+print("")
+print("③ 日本語文字化け修正中...")
+
+fixed_count = 0
+
+for entity in msp.query("TEXT"):
+
+    original = entity.dxf.text
+    fixed = original
+
+    try:
+        candidate = (
+            original
+            .encode("cp1252")
+            .decode("utf-8")
+        )
+
+        if candidate != original:
+            fixed = candidate
+
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+
+    if fixed != original:
+
+        print(
+            "文字修正:",
+            repr(original),
+            "→",
+            repr(fixed)
+        )
+
+        entity.dxf.text = fixed
+        fixed_count += 1
+
+
+# ============================================================
+# 4. LWPOLYLINEを解析
+# ============================================================
+
+print("")
+print("④ LWPOLYLINE解析中...")
+
+
+def is_close(a, b, tol=TOL):
+
+    return (
+        abs(a[0] - b[0]) <= tol and
+        abs(a[1] - b[1]) <= tol
+    )
+
+
+def classify_segment(p1, p2):
+
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+
+    if abs(dy) <= TOL:
+        return "H"
+
+    if abs(dx) <= TOL:
+        return "V"
+
+    return None
+
+
+# LINE候補
+segments = []
+
+# LINE化できないLWPOLYLINE
+untouched = []
+
+lw_list = list(msp.query("LWPOLYLINE"))
+
+print(
+    "LWPOLYLINE:",
+    len(lw_list)
+)
+
+
+# ============================================================
+# LWPOLYLINE → 線分候補
+# ============================================================
+
+for lw in lw_list:
+
+    points = list(lw.get_points("xyb"))
+
+    # 円弧(Bulge)があるものは触らない
+    has_bulge = any(
+        abs(p[2]) > TOL
+        for p in points
+    )
+
+    if has_bulge:
+        untouched.append(lw)
+        continue
+
+    # 頂点が2個以上必要
+    if len(points) < 2:
+        untouched.append(lw)
+        continue
+
+    # ポリラインを構成する各線分
+    local_segments = []
+
+    for i in range(len(points) - 1):
+
+        p1 = (
+            points[i][0],
+            points[i][1]
+        )
+
+        p2 = (
+            points[i + 1][0],
+            points[i + 1][1]
+        )
+
+        direction = classify_segment(
+            p1,
+            p2
+        )
+
+        # 水平・垂直以外はこのLWPOLYLINEをそのまま残す
+        if direction is None:
+
+            local_segments = []
+            break
+
+        local_segments.append(
+            {
+                "p1": p1,
+                "p2": p2,
+                "direction": direction,
+                "layer": lw.dxf.layer,
+                "linetype":
+                    lw.dxf.linetype
+                    if lw.dxf.hasattr("linetype")
+                    else None,
+                "color":
+                    lw.dxf.color
+                    if lw.dxf.hasattr("color")
+                    else None,
+            }
+        )
+
+    if not local_segments:
+
+        untouched.append(lw)
+
+    else:
+
+        segments.extend(
+            local_segments
+        )
+
+
+print(
+    "LINE化候補:",
+    len(segments)
+)
+
+print(
+    "そのまま残すLWPOLYLINE:",
+    len(untouched)
+)
+
+
+# ============================================================
+# 5. 同一直線上で重複している線は「最長だけ」残す
+# ============================================================
+
+print("")
+print("⑤ 重複線を整理中...")
+
+
+def line_length(seg):
+    dx = seg["p2"][0] - seg["p1"][0]
+    dy = seg["p2"][1] - seg["p1"][1]
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def overlap_on_same_line(a, b):
+
+    if a["direction"] != b["direction"]:
+        return False
+
+    if a["layer"] != b["layer"]:
+        return False
+
+    # 水平
+    if a["direction"] == "H":
+
+        if abs(a["p1"][1] - b["p1"][1]) > TOL:
+            return False
+
+        a_min = min(a["p1"][0], a["p2"][0])
+        a_max = max(a["p1"][0], a["p2"][0])
+
+        b_min = min(b["p1"][0], b["p2"][0])
+        b_max = max(b["p1"][0], b["p2"][0])
+
+    # 垂直
+    else:
+
+        if abs(a["p1"][0] - b["p1"][0]) > TOL:
+            return False
+
+        a_min = min(a["p1"][1], a["p2"][1])
+        a_max = max(a["p1"][1], a["p2"][1])
+
+        b_min = min(b["p1"][1], b["p2"][1])
+        b_max = max(b["p1"][1], b["p2"][1])
+
+    # 範囲が重なっているか
+    return (
+        min(a_max, b_max)
+        >=
+        max(a_min, b_min) - TOL
+    )
+
+
+# 長い順に並べる
+segments_sorted = sorted(
+    segments,
+    key=line_length,
+    reverse=True
+)
+
+kept_segments = []
+
+removed_count = 0
+
+for seg in segments_sorted:
+
+    duplicate = False
+
+    for kept in kept_segments:
+
+        if overlap_on_same_line(
+            seg,
+            kept
+        ):
+
+            duplicate = True
+            removed_count += 1
+            break
+
+    if not duplicate:
+        kept_segments.append(seg)
+
+
+merged = kept_segments
+
+
+print(
+    "元の線分:",
+    len(segments)
+)
+
+print(
+    "削除した重複線:",
+    removed_count
+)
+
+print(
+    "残した最長線:",
+    len(merged)
+)
+# ============================================================
+# 7. LINEとして追加
+# ============================================================
+
+print("")
+print("⑥ LINE生成中...")
+
+created_lines = 0
+
+for seg in merged:
+
+    attribs = {
+        "layer": seg["layer"]
+    }
+
+    if seg["linetype"]:
+        attribs["linetype"] = seg["linetype"]
+
+    if seg["color"] is not None:
+        attribs["color"] = seg["color"]
+
+    msp.add_line(
+        seg["p1"],
+        seg["p2"],
+        dxfattribs=attribs
+    )
+
+    created_lines += 1
+
+
+print(
+    "生成したLINE:",
+    created_lines
+)
+
+
+# ============================================================
+# 8. DXFコードページ
+# ============================================================
+
+dxf.header["$DWGCODEPAGE"] = "ANSI_932"
+
+
+# ============================================================
+# 9. 保存
+# ============================================================
+
+print("")
+print("⑦ 最終DXF保存中...")
+
+dxf.saveas(
+    filename
+)
+
+
+# ============================================================
+# 10. 一時ファイル削除
+# ============================================================
+
+try:
+
+    if os.path.exists(temp_file):
+        os.remove(temp_file)
+
+except Exception as e:
+
+    print(
+        "一時ファイル削除失敗:",
+        e
+    )
+
+
+# ============================================================
+# 11. 完了
+# ============================================================
+
+print("")
+print("========================================")
+print("DXF出力完了")
+print("========================================")
+print("保存先:", filename)
+print("日本語修正:", fixed_count)
+print("生成LINE:", created_lines)
+print("元LWPOLYLINE:", len(lw_list))
+print("残したLWPOLYLINE:", len(untouched))
+
+
+QtWidgets.QMessageBox.information(
+    None,
+    "DXF出力完了",
+    "DXFの出力が完了しました。\n\n"
+    "保存先:\n"
+    + filename
+    + "\n\n"
+    "日本語修正: "
+    + str(fixed_count)
+    + "件\n"
+    "LINE化: "
+    + str(created_lines)
+    + "本\n"
+    "残したLWPOLYLINE: "
+    + str(len(untouched))
+    + "本"
+)

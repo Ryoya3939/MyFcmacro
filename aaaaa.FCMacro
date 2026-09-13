@@ -1,0 +1,34 @@
+import FreeCADGui,FreeCAD,Draft
+import sys
+from pivy.coin import 
+# --- 最初にお掃除（ゾンビマクロをメモリから強制消去） ---
+if '__line_macro__' in sys.modules:
+    try:
+        sys.modules['__line_macro__'].view.removeEventCallbackPivy(SoMouseButtonEvent.getClassTypeId(),sys.modules['__line_macro__'].callback)
+    except:
+        pass
+    del sys.modules['__line_macro__']
+# --- ここからエラーの出ないクリーンなドラフト線マクロ ---
+class line:
+    def __init__(self):
+        # FreeCAD 1.x系で最もエラーが起きない確実なビュー取得
+        self.view=FreeCADGui.activeView()
+        self.stack=[]
+        self.callback=self.view.addEventCallbackPivy(SoMouseButtonEvent.getClassTypeId(),self.getpoint)
+    def getpoint(self,event_cb):
+        event=event_cb.getEvent()
+        if event.getState()==SoMouseButtonEvent.DOWN and event.getButton()==SoMouseButtonEvent.BUTTON1 and event.wasControlDown():
+            pos=event.getPosition()
+            point=self.view.getPoint(pos[0],pos[1])
+            self.stack.append(point)
+            if len(self.stack)==2:
+                # Draftの線を作成
+                Draft.make_line(self.stack[0],self.stack[1])
+                FreeCAD.ActiveDocument.recompute()
+                self.view.removeEventCallbackPivy(SoMouseButtonEvent.getClassTypeId(),self.callback)
+                if '__line_macro__' in sys.modules:
+                    del sys.modules['__line_macro__']
+if FreeCADGui.ActiveDocument is not None:
+    sys.modules['__line_macro__']=line()
+else:
+    print("エラー: アクティブなドキュメントがありません。")

@@ -1,0 +1,166 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import math
+from PySide import QtCore, QtWidgets
+
+class ProjectionSymbolClickTool(QtWidgets.QDialog):
+    def __init__(self):
+        super(ProjectionSymbolClickTool, self).__init__()
+        self.setWindowTitle("第三角法シンボル作成（中心線右側2倍版）")
+        self.resize(340, 260)
+        self.callback_id = None
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+
+        # 1. シンボルの基本サイズ設定
+        layout.addWidget(QtWidgets.QLabel("シンボルの基準サイズ（外径 D）[mm]:", self))
+        self.txt_size_d = QtWidgets.QLineEdit(self)
+        self.txt_size_d.setText("10.0")
+        layout.addWidget(self.txt_size_d)
+
+        # 2. 線の太さ
+        layout.addWidget(QtWidgets.QLabel("線の太さ (LineWidth):", self))
+        self.txt_line_width = QtWidgets.QLineEdit(self)
+        self.txt_line_width.setText("1.0")
+        layout.addWidget(self.txt_line_width)
+
+        # 3. 表示カラー
+        layout.addWidget(QtWidgets.QLabel("表示カラー:", self))
+        self.combo_color = QtWidgets.QComboBox(self)
+        self.combo_color.addItems(["黒色（図面標準）", "緑色", "赤色", "青色", "白色"])
+        self.combo_color.setCurrentText("黒色（図面標準）")
+        layout.addWidget(self.combo_color)
+
+        layout.addSpacing(15)
+
+        # 4. 実行ボタン
+        self.btn_run = QtWidgets.QPushButton("クリック位置を基準に作成", self)
+        self.btn_run.setStyleSheet("font-weight: bold; height: 35px; background-color: #2b579a; color: white;")
+        self.btn_run.clicked.connect(self.start_spatial_click_mode)
+        layout.addWidget(self.btn_run)
+        
+        self.lbl_status = QtWidgets.QLabel("※ボタンを押した後、配置したい【中心位置】をクリック", self)
+        self.lbl_status.setStyleSheet("color: blue; font-weight: bold;")
+        layout.addWidget(self.lbl_status)
+
+    def start_spatial_click_mode(self):
+        try:
+            self.d_outer = float(self.txt_size_d.text())
+            self.line_w = float(self.txt_line_width.text())
+            if self.d_outer <= 0:
+                QtWidgets.QMessageBox.warning(self, "エラー", "サイズには0より大きい数値を入力してください。")
+                return
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "エラー", "数値を入れてください。")
+            return
+            
+        color_name = self.combo_color.currentText()
+        if color_name == "赤色": self.my_color = (1.0, 0.0, 0.0, 1.0)
+        elif color_name == "青色": self.my_color = (0.0, 0.0, 1.0, 1.0)
+        elif color_name == "白色": self.my_color = (1.0, 1.0, 1.0, 1.0)
+        elif color_name == "緑色": self.my_color = (0.0, 1.0, 0.0, 1.0)
+        else: self.my_color = (0.0, 0.0, 0.0, 1.0)
+
+        if self.callback_id is None:
+            self.view = Gui.ActiveDocument.ActiveView
+            self.callback_id = self.view.addEventCallback("SoMouseButtonEvent", self.popup_at_click)
+            
+        self.btn_run.setEnabled(False)
+        self.btn_run.setText("3D画面をクリックしてください...")
+        self.lbl_status.setText("状態: 空間クリック待ちです")
+
+    def popup_at_click(self, dictionary):
+        if dictionary["State"] == "DOWN" and dictionary["Button"] == "BUTTON1":
+            
+            if self.callback_id is not None:
+                self.view.removeEventCallback("SoMouseButtonEvent", self.callback_id)
+                self.callback_id = None
+
+            pos_x = dictionary["Position"]
+            pos_y = dictionary["Position"]
+            p_click = self.view.getPoint(pos_x, pos_y)
+
+            if not p_click:
+                cx, cy, cz = 0.0, 0.0, 0.0
+            else:
+                cx, cy, cz = p_click.x, p_click.y, p_click.z
+
+            doc = App.ActiveDocument if App.ActiveDocument else App.newDocument("Projection_Symbol")
+
+            # JIS規格のプロポーション計算
+            d_inner = self.d_outer * 0.5
+            length = self.d_outer
+            gap = self.d_outer * 0.25
+            
+            # 【変更】標準の半幅サイズを基準に計算
+            base_half_len = self.d_outer * 1.25
+
+            edges = []
+
+            # --- 1. 同心円（左側） ---
+            circle_cx = cx
+            circle_cy = cy
+
+            circle_out = Part.makeCircle(self.d_outer / 2.0, App.Vector(circle_cx, circle_cy, cz), App.Vector(0,0,1))
+            circle_in = Part.makeCircle(d_inner / 2.0, App.Vector(circle_cx, circle_cy, cz), App.Vector(0,0,1))
+            edges.append(circle_out)
+            edges.append(circle_in)
+
+            # --- 2. 円錐台（右側） ---
+            cone_lx = circle_cx + (self.d_outer / 2.0) + gap
+            cone_rx = cone_lx + length
+
+            p1 = App.Vector(cone_lx, cy + (self.d_outer / 2.0), cz)
+            p2 = App.Vector(cone_lx, cy - (self.d_outer / 2.0), cz)
+            p3 = App.Vector(cone_rx, cy - (d_inner / 2.0), cz)
+            p4 = App.Vector(cone_rx, cy + (d_inner / 2.0), cz)
+
+            edges.append(Part.makeLine(p1, p2))
+            edges.append(Part.makeLine(p2, p3))
+            edges.append(Part.makeLine(p3, p4))
+            edges.append(Part.makeLine(p4, p1))
+
+            # --- 3. 中心線（水平線の右側のみを2倍の長さに調整） ---
+            h_line_left = circle_cx - base_half_len       # 左側は従来通りの長さ
+            h_line_right = circle_cx + (base_half_len * 2.0) # 💡【核心】右側だけ2倍突き抜ける長さに計算
+            edges.append(Part.makeLine(App.Vector(h_line_left, cy, cz), App.Vector(h_line_right, cy, cz)))
+
+            # 垂直中心線
+            v_line_bottom = circle_cy - (self.d_outer * 0.7)
+            v_line_top = circle_cy + (self.d_outer * 0.7)
+            edges.append(Part.makeLine(App.Vector(circle_cx, v_line_bottom, cz), App.Vector(circle_cx, v_line_top, cz)))
+
+            # --- 4. 生成と描画更新 ---
+            symbol_compound = Part.makeCompound(edges)
+            symbol_obj = doc.addObject("Part::Feature", "Third_Angle_Projection_Symbol")
+            symbol_obj.Shape = symbol_compound
+
+            if hasattr(symbol_obj, "ViewObject") and symbol_obj.ViewObject:
+                symbol_obj.ViewObject.LineWidth = self.line_w
+                symbol_obj.ViewObject.LineColor = self.my_color
+
+            doc.recompute()
+            Gui.updateGui()
+            
+            self.accept()
+
+    def closeEvent(self, event):
+        if self.callback_id is not None:
+            self.view.removeEventCallback("SoMouseButtonEvent", self.callback_id)
+            self.callback_id = None
+        event.accept()
+
+# 多重起動防止
+if 'current_projection_dialog' in globals():
+    try:
+        current_projection_dialog.close()
+    except:
+        pass
+
+current_projection_dialog = ProjectionSymbolClickTool()
+current_projection_dialog.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint)
+current_projection_dialog.show()

@@ -1,0 +1,159 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import Draft
+from PySide import QtCore, QtWidgets
+
+class PerfectTwoLineCenterlineTool(QtWidgets.QDialog):
+    def __init__(self):
+        # 💡コンソールの巻き込みロックを防ぐため独立ウィンドウとして初期化
+        super(PerfectTwoLineCenterlineTool, self).__init__(None)
+        self.setWindowTitle("二線中間線 自動作成ツール")
+        self.resize(360, 320)
+        
+        # メモリ解放と最前面ピン留めの安全設定
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        self.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Window)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+
+        # 1. はみ出し量設定
+        layout.addWidget(QtWidgets.QLabel("二線の外側への追加はみ出し量 [mm]:", self))
+        self.txt_offset = QtWidgets.QLineEdit(self)
+        self.txt_offset.setText("10.0")
+        layout.addWidget(self.txt_offset)
+        
+        # 2. 線の太さ
+        layout.addWidget(QtWidgets.QLabel("線の太さ (LineWidth):", self))
+        self.txt_line_width = QtWidgets.QLineEdit(self)
+        self.txt_line_width.setText("1.0")
+        layout.addWidget(self.txt_line_width)
+
+        # 3. 線種選択
+        layout.addWidget(QtWidgets.QLabel("線種（Style）の選択:", self))
+        self.combo_style = QtWidgets.QComboBox(self)
+        self.combo_style.addItems(["実線 (Continuous)", "ダッシュ線 (Dashed)", "1点鎖線 (Dashdot)"])
+        self.combo_style.setCurrentIndex(2) # デフォルトを1点鎖線に
+        layout.addWidget(self.combo_style)
+
+        # 4. 表示カラー
+        layout.addWidget(QtWidgets.QLabel("表示カラー:", self))
+        self.combo_color = QtWidgets.QComboBox(self)
+        self.combo_color.addItems(["黒色（図面標準）", "緑色", "赤色", "青色", "白色"])
+        self.combo_color.setCurrentText("黒色（図面標準）")
+        layout.addWidget(self.combo_color)
+
+        layout.addSpacing(15)
+
+        # 5. 実行ボタン
+        self.btn_run = QtWidgets.QPushButton("選択した2本の間に中心線を作成", self)
+        self.btn_run.setStyleSheet("font-weight: bold; height: 35px; background-color: #2b579a; color: white;")
+        self.btn_run.clicked.connect(self.generate_centerline_from_lines)
+        layout.addWidget(self.btn_run)
+        
+        self.lbl_status = QtWidgets.QLabel("※3D画面で『2本の直線（ライン）』をCtrl選択して押してください", self)
+        self.lbl_status.setStyleSheet("color: blue; font-weight: bold;")
+        layout.addWidget(self.lbl_status)
+
+    def generate_centerline_from_lines(self):
+        selection = Gui.Selection.getSelectionEx()
+        
+        if not selection:
+            QtWidgets.QMessageBox.warning(self, "エラー", "3D画面で直線エッジを選択してください。")
+            return
+
+        try:
+            input_offset = float(self.txt_offset.text())
+            line_w = float(self.txt_line_width.text())
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "エラー", "数値を入れてください。")
+            return
+
+        # カラーの決定
+        color_name = self.combo_color.currentText()
+        if color_name == "赤色": my_color = (1.0, 0.0, 0.0, 1.0)
+        elif color_name == "青色": my_color = (0.0, 0.0, 1.0, 1.0)
+        elif color_name == "白色": my_color = (1.0, 1.0, 1.0, 1.0)
+        elif color_name == "緑色": my_color = (0.0, 1.0, 0.0, 1.0)
+        else: my_color = (0.0, 0.0, 0.0, 1.0)
+
+        # 線種指定文字列
+        style_idx = self.combo_style.currentIndex()
+        draw_style_str = "Dashdot" if style_idx == 2 else ("Dashed" if style_idx == 1 else "Continuous")
+
+        doc = App.ActiveDocument
+        if not doc:
+            return
+
+        line_edges = []
+
+        # 選択されたオブジェクトから直線エッジのみを抽出
+        for sel_obj in selection:
+            for sub_shape in sel_obj.SubObjects:
+                if hasattr(sub_shape, "Curve") and isinstance(sub_shape.Curve, (Part.LineSegment, Part.Line)):
+                    line_edges.append(sub_shape)
+
+        # 2本ぴったり選ばれているか確認
+        if len(line_edges) != 2:
+            QtWidgets.QMessageBox.warning(
+                self, 
+                "選択エラー", 
+                f"必ず2本の直線エッジ（ライン）を選択してください。\n(現在認識されている直線エッジ: {len(line_edges)}個)"
+            )
+            return
+
+        # 2本の直線の端点を取得して中点を算出
+        p1_s = line_edges[0].Vertexes[0].Point
+        p1_e = line_edges[0].Vertexes[-1].Point
+        p2_s = line_edges[1].Vertexes[0].Point
+        p2_e = line_edges[1].Vertexes[-1].Point
+
+        # 線の走る方向の反転を幾何学的に補正（近い端点同士をペアリング）
+        if (p1_s - p2_s).Length > (p1_s - p2_e).Length:
+            p2_s, p2_e = p2_e, p2_s
+
+        # 2本の間の正確な中間位置の始点と終点を計算
+        mid_start = App.Vector((p1_s.x + p2_s.x) / 2.0, (p1_s.y + p2_s.y) / 2.0, (p1_s.z + p2_s.z) / 2.0)
+        mid_end = App.Vector((p1_e.x + p2_e.x) / 2.0, (p1_e.y + p2_e.y) / 2.0, (p1_e.z + p2_e.z) / 2.0)
+
+        # はみ出し方向の単位ベクトルを計算
+        v_dir = mid_end - mid_start
+        v_len = v_dir.Length
+        if v_len == 0:
+            return
+        v_unit = v_dir / v_len
+
+        # 指定量だけ前後に延長
+        final_start = mid_start - (v_unit * input_offset)
+        final_end = mid_end + (v_unit * input_offset)
+
+        # 💡Draftワイヤー形式で出力してグループ＆線種表示を完璧に
+        center_wire = Draft.make_wire([final_start, final_end], closed=False)
+
+        if hasattr(center_wire, "ViewObject") and center_wire.ViewObject:
+            center_wire.ViewObject.LineWidth = line_w
+            center_wire.ViewObject.LineColor = my_color
+            if hasattr(center_wire.ViewObject, "DrawStyle"):
+                center_wire.ViewObject.DrawStyle = draw_style_str
+
+        Draft.autogroup(center_wire)
+        doc.recompute()
+        Gui.updateGui()
+
+        self.lbl_status.setText("状態: 二線の中間中心線を作成しました！")
+        self.lbl_status.setStyleSheet("color: green; font-weight: bold;")
+
+    def closeEvent(self, event):
+        event.accept()
+
+# 多重起動防止
+if 'current_twoline_dialog' in globals():
+    try:
+        current_twoline_dialog.close()
+    except:
+        pass
+
+current_twoline_dialog = PerfectTwoLineCenterlineTool()
+current_twoline_dialog.show()

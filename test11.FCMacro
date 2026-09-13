@@ -1,0 +1,645 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import os
+import re
+import Draft
+
+
+# ============================================================
+# 設定
+# ============================================================
+
+dxfExportBlocks = True
+
+OUTPUT_FOLDER = r"C:\Users\81907\OneDrive\Desktop"
+
+
+# ============================================================
+# DXFハンドル番号
+# ============================================================
+
+class dxfcounter:
+
+    def __init__(self):
+        self.count = 10000
+
+    def incr(self, matchobj):
+
+        self.count += 1
+
+        return format(self.count, "02x")
+
+
+# ============================================================
+# DXFカスタマイズ
+# ============================================================
+
+def customize_dxf(proj, view, obj):
+
+    return proj
+
+
+# ============================================================
+# Draft・ArchビューをBLOCK化
+# ============================================================
+
+def getViewBlock(geom, view, blockcount):
+
+    insert = ""
+    block = ""
+
+    # --------------------------------------------------------
+    # 回転角度
+    # --------------------------------------------------------
+
+    r = view.Rotation.Value
+
+    if r != 0:
+        r = -r
+
+    # --------------------------------------------------------
+    # geomをリスト化
+    # --------------------------------------------------------
+
+    if not isinstance(geom, list):
+        geom = [geom]
+
+    # --------------------------------------------------------
+    # DXFジオメトリ処理
+    # --------------------------------------------------------
+
+    for g in geom:
+
+        if dxfExportBlocks:
+
+            # ------------------------------------------------
+            # BLOCK内の属性
+            # ------------------------------------------------
+
+            g = g.replace(
+                "sheet_layer\n",
+                "0\n6\nBYBLOCK\n62\n0\n5\n_handle_\n"
+            )
+
+            # ------------------------------------------------
+            # BLOCK名
+            # ------------------------------------------------
+
+            block_name = view.Name + str(blockcount)
+
+            # ------------------------------------------------
+            # BLOCK開始
+            # ------------------------------------------------
+
+            block += (
+                "0\nBLOCK\n"
+                "5\n_handle_\n"
+                "100\nAcDbEntity\n"
+                "8\n0\n"
+                "100\nAcDbBlockBegin\n"
+                "2\n"
+            )
+
+            block += block_name
+
+            block += (
+                "\n70\n0\n"
+                "10\n0\n"
+                "20\n0\n"
+                "3\n"
+            )
+
+            block += block_name
+
+            block += "\n1\n\n"
+
+            # ------------------------------------------------
+            # ジオメトリ追加
+            # ------------------------------------------------
+
+            block += g
+
+            # ------------------------------------------------
+            # BLOCK終了
+            # ------------------------------------------------
+
+            block += (
+                "0\nENDBLK\n"
+                "5\n_handle_\n"
+                "100\nAcDbEntity\n"
+                "8\n0\n"
+                "100\nAcDbBlockEnd\n"
+            )
+
+            # ------------------------------------------------
+            # INSERT
+            # ------------------------------------------------
+
+            insert += (
+                "0\nINSERT\n"
+                "5\n_handle_\n"
+                "8\n0\n"
+                "6\nBYLAYER\n"
+                "62\n256\n"
+                "2\n"
+            )
+
+            insert += block_name
+
+            insert += (
+                "\n10\n" + str(view.X.Value) +
+                "\n20\n" + str(view.Y.Value) +
+                "\n30\n0\n"
+                "\n41\n" + str(view.Scale) +
+                "\n42\n" + str(view.Scale) +
+                "\n43\n" + str(view.Scale) +
+                "\n50\n" + str(r) +
+                "\n"
+            )
+
+            print(
+                "  ブロック:",
+                block_name,
+                "位置:",
+                view.X.Value,
+                view.Y.Value,
+                "回転:",
+                r
+            )
+
+            # 次のBLOCK番号へ
+            blockcount += 1
+
+        else:
+
+            g = g.replace(
+                "sheet_layer\n",
+                "0\n5\n_handle_\n"
+            )
+
+            insert += g
+
+    return block, insert, blockcount
+
+
+# ============================================================
+# TechDrawビューをDXF化
+# ============================================================
+
+def getViewDXF(view, blockcount):
+
+    block = ""
+    insert = ""
+
+    # ========================================================
+    # 投影グループ
+    # ========================================================
+
+    if view.isDerivedFrom("TechDraw::DrawProjGroup"):
+
+        print("")
+        print("投影グループ処理:", view.Label)
+
+        for child in view.Views:
+
+            print(
+                "  子ビュー:",
+                child.Label,
+                "|",
+                child.TypeId
+            )
+
+            # 子ビューへ現在のblockcountを渡す
+            child_block, child_insert, blockcount = getViewDXF(
+                child,
+                blockcount
+            )
+
+            block += child_block
+            insert += child_insert
+
+        return block, insert, blockcount
+
+    # ========================================================
+    # Draftビュー
+    # ========================================================
+
+    if view.isDerivedFrom("TechDraw::DrawViewDraft"):
+
+        print("DXF変換:", view.Label)
+
+        geom = Draft.get_dxf(view)
+
+        block, insert, blockcount = getViewBlock(
+            geom,
+            view,
+            blockcount
+        )
+
+    # ========================================================
+    # Archビュー
+    # ========================================================
+
+    elif view.isDerivedFrom("TechDraw::DrawViewArch"):
+
+        print("DXF変換:", view.Label)
+
+        import ArchSectionPlane
+
+        geom = ArchSectionPlane.getDXF(view)
+
+        block, insert, blockcount = getViewBlock(
+            geom,
+            view,
+            blockcount
+        )
+
+    # ========================================================
+    # Partビュー
+    # 投影グループ子ビュー
+    # ========================================================
+
+    elif (
+        view.isDerivedFrom("TechDraw::DrawViewPart")
+        or view.isDerivedFrom("TechDraw::DrawProjGroupItem")
+    ):
+
+        print("DXF変換:", view.Label)
+
+        import TechDraw
+
+        # ----------------------------------------------------
+        # 回転角度
+        # ----------------------------------------------------
+
+        r = view.Rotation.Value
+
+        if r != 0:
+            r = -r
+
+        # ----------------------------------------------------
+        # 元オブジェクト処理
+        # ----------------------------------------------------
+
+        for obj in view.Source:
+
+            print("  元オブジェクト:", obj.Label)
+
+            if not hasattr(obj, "Shape"):
+                continue
+
+            if obj.Shape.isNull():
+                continue
+
+            # ------------------------------------------------
+            # 投影DXF取得
+            # ------------------------------------------------
+
+            proj = TechDraw.projectToDXF(
+                obj.Shape,
+                view.Direction
+            )
+
+            proj = customize_dxf(
+                proj,
+                view,
+                obj
+            )
+
+            # =================================================
+            # BLOCK出力
+            # =================================================
+
+            if dxfExportBlocks:
+
+                proj = proj.replace(
+                    "sheet_layer\n",
+                    "0\n6\nBYBLOCK\n62\n0\n5\n_handle_\n"
+                )
+
+                # ------------------------------------------------
+                # BLOCK名
+                # ------------------------------------------------
+
+                block_name = (
+                    view.Name +
+                    str(blockcount)
+                )
+
+                # ------------------------------------------------
+                # BLOCK開始
+                # ------------------------------------------------
+
+                block += (
+                    "0\nBLOCK\n"
+                    "5\n_handle_\n"
+                    "100\nAcDbEntity\n"
+                    "8\n0\n"
+                    "100\nAcDbBlockBegin\n"
+                    "2\n"
+                )
+
+                block += block_name
+
+                block += (
+                    "\n70\n0\n"
+                    "10\n0\n"
+                    "20\n0\n"
+                    "3\n"
+                )
+
+                block += block_name
+
+                block += "\n1\n\n"
+
+                # ------------------------------------------------
+                # 投影形状
+                # ------------------------------------------------
+
+                block += proj
+
+                # ------------------------------------------------
+                # BLOCK終了
+                # ------------------------------------------------
+
+                block += (
+                    "0\nENDBLK\n"
+                    "5\n_handle_\n"
+                    "100\nAcDbEntity\n"
+                    "8\n0\n"
+                    "100\nAcDbBlockEnd\n"
+                )
+
+                # ------------------------------------------------
+                # INSERT開始
+                # ------------------------------------------------
+
+                insert += (
+                    "0\nINSERT\n"
+                    "5\n_handle_\n"
+                    "8\n0\n"
+                    "6\nBYLAYER\n"
+                    "62\n256\n"
+                    "2\n"
+                )
+
+                insert += block_name
+
+                # ------------------------------------------------
+                # INSERT位置・縮尺・回転
+                # ------------------------------------------------
+
+                insert += (
+                    "\n10\n" + str(view.X.Value) +
+                    "\n20\n" + str(view.Y.Value) +
+                    "\n30\n0\n"
+                    "\n41\n" + str(view.Scale) +
+                    "\n42\n" + str(view.Scale) +
+                    "\n43\n" + str(view.Scale) +
+                    "\n50\n" + str(r) +
+                    "\n"
+                )
+
+                print(
+                    "  ブロック:",
+                    block_name,
+                    "位置:",
+                    view.X.Value,
+                    view.Y.Value,
+                    "回転:",
+                    r
+                )
+
+                # ------------------------------------------------
+                # 次のBLOCK番号
+                # ------------------------------------------------
+
+                blockcount += 1
+
+            # =================================================
+            # BLOCKを使わない場合
+            # =================================================
+
+            else:
+
+                proj = proj.replace(
+                    "sheet_layer\n",
+                    "0\n5\n_handle_\n"
+                )
+
+                insert += proj
+
+    # ========================================================
+    # Annotation
+    # ========================================================
+
+    elif view.isDerivedFrom(
+        "TechDraw::DrawViewAnnotation"
+    ):
+
+        if hasattr(view, "Text") and view.Text:
+
+            r = view.Rotation.Value
+
+            if r != 0:
+                r = -r
+
+            insert = (
+                "0\nTEXT\n"
+                "5\n_handle_\n"
+                "8\n0\n"
+                "100\nAcDbEntity\n"
+                "100\nAcDbText\n"
+                "5\n_handle_\n"
+                "10\n" + str(view.X.Value) +
+                "\n20\n" + str(view.Y.Value) +
+                "\n30\n0\n"
+                "40\n" + str(view.Scale / 2) +
+                "\n50\n" + str(r) +
+                "\n1\n" + view.Text[0] +
+                "\n"
+            )
+
+    # ========================================================
+    # 未対応
+    # ========================================================
+
+    else:
+
+        print(
+            "DXF未対応ビュー:",
+            view.Label,
+            "|",
+            view.TypeId
+        )
+
+    return block, insert, blockcount
+
+
+# ============================================================
+# TechDrawページをDXF出力
+# ============================================================
+
+def exportPage(page, filename):
+
+    if not page.isDerivedFrom(
+        "TechDraw::DrawPage"
+    ):
+
+        raise Exception(
+            "TechDrawページではありません。"
+        )
+
+    # ========================================================
+    # DXFテンプレート
+    # ========================================================
+
+    template = (
+        "0\nSECTION\n"
+        "2\nHEADER\n"
+        "9\n$ACADVER\n"
+        "1\nAC1009\n"
+        "0\nENDSEC\n"
+
+        "0\nSECTION\n"
+        "2\nBLOCKS\n"
+        "999\n$blocks\n"
+        "0\nENDSEC\n"
+
+        "0\nSECTION\n"
+        "2\nENTITIES\n"
+        "999\n$entities\n"
+        "0\nENDSEC\n"
+
+        "0\nEOF\n"
+    )
+
+    blocks = ""
+    entities = ""
+
+    # ========================================================
+    # ページ全体でBLOCK番号を共有
+    # ========================================================
+
+    blockcount = 1
+
+    # ========================================================
+    # ページ内の全ビュー処理
+    # ========================================================
+
+    for view in page.Views:
+
+        print("")
+        print(
+            "処理:",
+            view.Label,
+            "|",
+            view.TypeId
+        )
+
+        try:
+
+            # BLOCK番号を次のビューへ引き継ぐ
+            block, insert, blockcount = getViewDXF(
+                view,
+                blockcount
+            )
+
+            blocks += block
+            entities += insert
+
+        except Exception as exc:
+
+            print(
+                "ビュー処理エラー:",
+                view.Label,
+                exc
+            )
+
+    # ========================================================
+    # BLOCK・ENTITYをテンプレートへ挿入
+    # ========================================================
+
+    template = template.replace(
+        "999\n$blocks",
+        blocks.rstrip()
+    )
+
+    template = template.replace(
+        "999\n$entities",
+        entities.rstrip()
+    )
+
+    # ========================================================
+    # ハンドル番号置換
+    # ========================================================
+
+    counter = dxfcounter()
+
+    pattern = re.compile(
+        r"_handle_"
+    )
+
+    template = pattern.sub(
+        counter.incr,
+        template
+    )
+
+    # ========================================================
+    # ファイル出力
+    # ========================================================
+
+    with open(
+        filename,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        f.write(template)
+
+    print("")
+    print("DXF出力完了")
+    print(filename)
+
+
+# ============================================================
+# 選択されたTechDrawページを出力
+# ============================================================
+
+selection = Gui.Selection.getSelection()
+
+if not selection:
+
+    raise Exception(
+        "TechDrawページを選択してください。"
+    )
+
+page = selection[0]
+
+if not page.isDerivedFrom(
+    "TechDraw::DrawPage"
+):
+
+    raise Exception(
+        "選択したものはTechDrawページではありません。"
+    )
+
+
+# ============================================================
+# 出力ファイル名
+# ============================================================
+
+filename = os.path.join(
+    OUTPUT_FOLDER,
+    page.Label + ".dxf"
+)
+
+
+# ============================================================
+# DXF出力実行
+# ============================================================
+
+exportPage(
+    page,
+    filename
+)

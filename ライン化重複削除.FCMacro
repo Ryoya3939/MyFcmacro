@@ -1,0 +1,437 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+
+import os
+import sys
+
+
+# ============================================================
+# Qt 読み込み
+# ============================================================
+
+try:
+    from PySide import QtGui
+    from PySide import QtCore
+
+except ImportError:
+    from PySide2 import QtWidgets as QtGui
+    from PySide2 import QtCore
+
+
+# ============================================================
+# 現在のマクロファイルの場所
+# ============================================================
+
+try:
+    MACRO_DIR = os.path.dirname(__file__)
+
+except NameError:
+
+    # __file__ が使えない場合は
+    # FreeCADのマクロフォルダを使用
+    MACRO_DIR = App.getUserMacroDir()
+
+
+# ============================================================
+# 実行するマクロ
+# ============================================================
+
+DRAFT_TO_LINE_FILE = os.path.join(
+    MACRO_DIR,
+    "DRAFT_to_Line.py"
+)
+
+REMOVE_DUPLICATE_FILE = os.path.join(
+    MACRO_DIR,
+    "Remove_Duplicate_Lines.py"
+)
+
+
+# ============================================================
+# マクロ実行関数
+# ============================================================
+
+def run_macro(file_path):
+
+    if not os.path.exists(file_path):
+
+        raise Exception(
+            "マクロが見つかりません:\n"
+            + file_path
+        )
+
+
+    with open(
+        file_path,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        code = f.read()
+
+
+    # マクロを実行
+    exec(
+        compile(
+            code,
+            file_path,
+            "exec"
+        ),
+        {
+            "__file__": file_path,
+            "__name__": "__main__"
+        }
+    )
+
+
+# ============================================================
+# メインWidget
+# ============================================================
+
+class LineProcessorWidget(QtGui.QWidget):
+
+    def __init__(self):
+
+        super(LineProcessorWidget, self).__init__()
+
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #2b2b2b;
+                color: white;
+            }
+
+            QPushButton {
+                background-color: #555555;
+                color: white;
+                border: 1px solid #777777;
+                padding: 8px;
+            }
+
+            QPushButton:hover {
+                background-color: #666666;
+            }
+
+            QLabel {
+                color: white;
+            }
+        """)
+
+        self.setWindowTitle(
+            "オブジェクトをライン化して重複線を消すマクロ"
+        )
+
+        self.setMinimumWidth(500)
+
+
+        # ====================================================
+        # レイアウト
+        # ====================================================
+        # ====================================================
+        # レイアウト
+        # ====================================================
+
+        layout = QtGui.QVBoxLayout(self)
+
+
+        # ====================================================
+        # タイトル
+        # ====================================================
+
+        title = QtGui.QLabel(
+            "オブジェクトをライン化して重複線を消すマクロ"
+        )
+
+        title.setAlignment(
+            QtCore.Qt.AlignCenter
+        )
+
+        font = title.font()
+
+        font.setPointSize(14)
+        font.setBold(True)
+
+        title.setFont(font)
+
+        layout.addWidget(title)
+
+
+        # ====================================================
+        # 説明
+        # ====================================================
+
+        description = QtGui.QLabel(
+            "選択したオブジェクトを1本ずつのLineに変換し、"
+            "重複している線を自動的に整理します。\n\n"
+            "・完全に重複している線 → 1本だけ残す\n"
+            "・長い線に完全に含まれている短い線 → 削除\n"
+            "・一部分だけ重複している線 → 削除せず赤色表示"
+        )
+
+        description.setWordWrap(True)
+
+        layout.addWidget(description)
+
+
+        # ====================================================
+        # 処理の流れ
+        # ====================================================
+
+        flow = QtGui.QLabel(
+            "処理の流れ\n\n"
+            "① 選択したオブジェクト\n"
+            "        ↓\n"
+            "② オブジェクトをLine化\n"
+            "        ↓\n"
+            "③ 重複線を解析\n"
+            "        ↓\n"
+            "④ 完全重複・内包された短い線を削除\n"
+            "        ↓\n"
+            "⑤ 部分的な重複線を赤色表示"
+        )
+
+        flow.setAlignment(
+            QtCore.Qt.AlignLeft
+        )
+
+        layout.addWidget(flow)
+
+
+        # ====================================================
+        # 実行ボタン
+        # ====================================================
+
+        self.run_button = QtGui.QPushButton(
+            "実 行"
+        )
+
+        self.run_button.setMinimumHeight(50)
+
+        font = self.run_button.font()
+
+        font.setPointSize(14)
+        font.setBold(True)
+
+        self.run_button.setFont(font)
+
+        self.run_button.clicked.connect(
+            self.run_process
+        )
+
+        layout.addWidget(
+            self.run_button
+        )
+
+
+        # ====================================================
+        # ステータス
+        # ====================================================
+
+        self.status = QtGui.QLabel(
+            "オブジェクトを選択してから「実行」を押してください。"
+        )
+
+        self.status.setWordWrap(True)
+
+        layout.addWidget(
+            self.status
+        )
+
+
+    # ========================================================
+    # 実行処理
+    # ========================================================
+
+    def run_process(self):
+
+
+        # ----------------------------------------------------
+        # 選択確認
+        # ----------------------------------------------------
+
+        selection = Gui.Selection.getSelection()
+
+        if not selection:
+
+            QtGui.QMessageBox.warning(
+                self,
+                "選択エラー",
+                "処理するオブジェクトを選択してください。"
+            )
+
+            return
+
+
+        # ----------------------------------------------------
+        # ボタン無効化
+        # ----------------------------------------------------
+
+        self.run_button.setEnabled(False)
+
+
+        try:
+
+            # =================================================
+            # ① DRAFT_toLine.py
+            # =================================================
+
+            self.status.setText(
+                "① オブジェクトをLine化しています..."
+            )
+
+            App.Console.PrintMessage(
+                "\n========================================\n"
+            )
+
+            App.Console.PrintMessage(
+                "① DRAFT_toLine.py 実行開始\n"
+            )
+
+            App.Console.PrintMessage(
+                "========================================\n"
+            )
+
+
+            App.Gui.updateGui()
+
+            run_macro(
+                DRAFT_TO_LINE_FILE
+            )
+
+
+            # -------------------------------------------------
+            # 再計算
+            # -------------------------------------------------
+
+            App.ActiveDocument.recompute()
+
+            App.Gui.updateGui()
+
+
+            # =================================================
+            # ② Remove_Duplicate_Lines.py
+            # =================================================
+
+            self.status.setText(
+                "② 重複線を解析しています..."
+            )
+
+            App.Console.PrintMessage(
+                "\n========================================\n"
+            )
+
+            App.Console.PrintMessage(
+                "② Remove_Duplicate_Lines.py 実行開始\n"
+            )
+
+            App.Console.PrintMessage(
+                "========================================\n"
+            )
+
+
+            App.Gui.updateGui()
+
+
+            # -------------------------------------------------
+            # 重要
+            #
+            # 1つ目の処理後に作られたLineを
+            # 選択状態にする
+            # -------------------------------------------------
+
+            result_group = App.ActiveDocument.getObject(
+                "Downgrade_Results"
+            )
+
+
+            if result_group:
+
+                Gui.Selection.clearSelection()
+
+
+                for obj in result_group.Group:
+
+                    try:
+
+                        if hasattr(obj, "Shape"):
+
+                            Gui.Selection.addSelection(
+                                obj
+                            )
+
+                    except:
+
+                        continue
+
+
+            # -------------------------------------------------
+            # 重複線処理実行
+            # -------------------------------------------------
+
+            run_macro(
+                REMOVE_DUPLICATE_FILE
+            )
+
+
+            # =================================================
+            # 完了
+            # =================================================
+
+            App.ActiveDocument.recompute()
+
+            App.Gui.updateGui()
+
+
+            self.status.setText(
+                "処理が完了しました。"
+            )
+
+
+            QtGui.QMessageBox.information(
+                self,
+                "完了",
+                "オブジェクトのLine化と重複線処理が完了しました。"
+            )
+
+
+        except Exception as e:
+
+            self.status.setText(
+                "エラーが発生しました。"
+            )
+
+
+            App.Console.PrintError(
+                "\n処理エラー:\n"
+                + str(e)
+                + "\n"
+            )
+
+
+            QtGui.QMessageBox.critical(
+                self,
+                "エラー",
+                str(e)
+            )
+
+
+        finally:
+
+            self.run_button.setEnabled(True)
+
+
+# ============================================================
+# Widgetを表示
+# ============================================================
+
+try:
+
+    line_processor_widget.close()
+
+except:
+
+    pass
+
+
+line_processor_widget = LineProcessorWidget()
+
+line_processor_widget.show()

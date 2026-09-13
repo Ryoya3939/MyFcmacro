@@ -1,0 +1,25 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import Draft
+
+sel = Gui.Selection.getSelectionEx()
+
+if not sel:
+    print("円弧を選択してください")
+else:
+    edge = sel[0].SubObjects[0]
+    curve = edge.Curve
+
+    if isinstance(curve, Part.Circle):
+        R = curve.Radius
+        text = "R{}".format(round(R, 2))
+
+        offset = App.Vector(5, 5, 0)
+        pos = curve.Center.add(offset)
+        Draft.make_text([text], pos)
+
+        App.ActiveDocument.recompute()
+        print("寸法文字を作成:", text)
+    else:
+        print("円弧ではありません")

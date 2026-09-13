@@ -1,0 +1,1640 @@
+
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import TechDraw
+from PySide import QtWidgets
+import os
+import re
+
+
+# ============================================================
+# 基本
+# ============================================================
+
+doc = App.ActiveDocument
+
+if doc is None:
+    QtWidgets.QMessageBox.critical(
+        None,
+        "TechDraw診断",
+        "アクティブなドキュメントがありません。"
+    )
+    raise Exception("ActiveDocumentがありません")
+
+
+proj = doc.getObject("ProjGroup")
+
+if proj is None:
+    QtWidgets.QMessageBox.critical(
+        None,
+        "TechDraw診断",
+        "ProjGroupがありません。"
+    )
+    raise Exception("ProjGroupがありません")
+
+
+# ============================================================
+# ログ
+# ============================================================
+
+log = []
+
+
+def LOG(text=""):
+    text = str(text)
+    print(text)
+    log.append(text)
+
+
+# ============================================================
+# ヘッダー
+# ============================================================
+
+LOG("")
+LOG("========================================")
+LOG("TechDraw View 診断マクロ")
+LOG("========================================")
+LOG("")
+LOG("Document : " + str(doc.Label))
+LOG("ProjGroup: " + str(proj.Name))
+LOG("")
+
+
+# ============================================================
+# View一覧
+# ============================================================
+
+LOG("========================================")
+LOG("ProjGroup Views")
+LOG("========================================")
+
+try:
+    views = list(proj.Views)
+except Exception as e:
+    LOG("proj.Views取得失敗: " + str(e))
+    views = []
+
+LOG("View Count = " + str(len(views)))
+LOG("")
+
+
+for i, view in enumerate(views):
+
+    LOG("----------------------------------------")
+    LOG("View[" + str(i) + "]")
+    LOG("----------------------------------------")
+
+    try:
+        LOG("Name     = " + str(view.Name))
+    except:
+        pass
+
+    try:
+        LOG("Label    = " + str(view.Label))
+    except:
+        pass
+
+    try:
+        LOG("TypeId   = " + str(view.TypeId))
+    except:
+        pass
+
+    try:
+        LOG("Direction= " + str(view.Direction))
+    except:
+        pass
+
+    try:
+        LOG("X        = " + str(view.X))
+    except:
+        pass
+
+    try:
+        LOG("Y        = " + str(view.Y))
+    except:
+        pass
+
+    try:
+        LOG("Scale    = " + str(view.Scale))
+    except:
+        pass
+
+    LOG("")
+
+
+# ============================================================
+# BEFORE RECOMPUTE
+# ============================================================
+
+LOG("")
+LOG("========================================")
+LOG("BEFORE RECOMPUTE")
+LOG("========================================")
+LOG("")
+
+before_data = {}
+
+
+for view in views:
+
+    try:
+        if view.TypeId != "TechDraw::DrawProjGroupItem":
+
+            LOG(
+                "SKIP: "
+                + str(view.Label)
+                + " / "
+                + str(view.TypeId)
+            )
+
+            continue
+
+    except Exception as e:
+
+        LOG("TypeId確認失敗: " + str(e))
+        continue
+
+
+    label = str(view.Label)
+
+    LOG("----------------------------------------")
+    LOG("VIEW: " + label)
+    LOG("----------------------------------------")
+
+
+    # --------------------------------------------------------
+    # 基本情報
+    # --------------------------------------------------------
+
+    try:
+        LOG("Direction = " + str(view.Direction))
+    except Exception as e:
+        LOG("Direction ERROR: " + str(e))
+
+    try:
+        LOG("X = " + str(view.X))
+    except Exception as e:
+        LOG("X ERROR: " + str(e))
+
+    try:
+        LOG("Y = " + str(view.Y))
+    except Exception as e:
+        LOG("Y ERROR: " + str(e))
+
+    try:
+        LOG("Scale = " + str(view.Scale))
+    except Exception as e:
+        LOG("Scale ERROR: " + str(e))
+
+
+    # --------------------------------------------------------
+    # Visible
+    # --------------------------------------------------------
+
+    try:
+
+        visible_edges = list(
+            view.getVisibleEdges()
+        )
+
+        visible_count = len(visible_edges)
+
+        LOG(
+            "Visible Edges = "
+            + str(visible_count)
+        )
+
+    except Exception as e:
+
+        visible_edges = []
+
+        LOG(
+            "getVisibleEdges ERROR: "
+            + str(e)
+        )
+
+
+    # --------------------------------------------------------
+    # Hidden
+    # --------------------------------------------------------
+
+    try:
+
+        hidden_edges = list(
+            view.getHiddenEdges()
+        )
+
+        hidden_count = len(hidden_edges)
+
+        LOG(
+            "Hidden Edges = "
+            + str(hidden_count)
+        )
+
+    except Exception as e:
+
+        hidden_edges = []
+
+        LOG(
+            "getHiddenEdges ERROR: "
+            + str(e)
+        )
+
+
+    before_data[label] = {
+
+        "visible": visible_count
+        if "visible_count" in locals()
+        else 0,
+
+        "hidden": hidden_count
+        if "hidden_count" in locals()
+        else 0
+
+    }
+
+
+    # --------------------------------------------------------
+    # Edge種類
+    # --------------------------------------------------------
+
+    visible_types = {}
+
+    for edge in visible_edges:
+
+        try:
+
+            cname = type(edge.Curve).__name__
+
+            visible_types[cname] = (
+                visible_types.get(cname, 0) + 1
+            )
+
+        except Exception:
+            pass
+
+
+    hidden_types = {}
+
+    for edge in hidden_edges:
+
+        try:
+
+            cname = type(edge.Curve).__name__
+
+            hidden_types[cname] = (
+                hidden_types.get(cname, 0) + 1
+            )
+
+        except Exception:
+            pass
+
+
+    LOG(
+        "Visible Curve Types = "
+        + str(visible_types)
+    )
+
+    LOG(
+        "Hidden Curve Types  = "
+        + str(hidden_types)
+    )
+
+    LOG("")
+
+
+# ============================================================
+# RECOMPUTE
+# ============================================================
+
+LOG("")
+LOG("========================================")
+LOG("RECOMPUTE")
+LOG("========================================")
+LOG("")
+
+
+try:
+
+    doc.recompute()
+
+    LOG("doc.recompute() = OK")
+
+except Exception as e:
+
+    LOG(
+        "doc.recompute() ERROR: "
+        + str(e)
+    )
+
+
+try:
+
+    Gui.updateGui()
+
+    LOG("Gui.updateGui() = OK")
+
+except Exception as e:
+
+    LOG(
+        "Gui.updateGui() ERROR: "
+        + str(e)
+    )
+
+
+# ============================================================
+# AFTER RECOMPUTE
+# ============================================================
+
+LOG("")
+LOG("========================================")
+LOG("AFTER RECOMPUTE")
+LOG("========================================")
+LOG("")
+
+after_data = {}
+
+
+for view in views:
+
+    try:
+
+        if view.TypeId != "TechDraw::DrawProjGroupItem":
+            continue
+
+    except Exception:
+        continue
+
+
+    label = str(view.Label)
+
+    LOG("----------------------------------------")
+    LOG("VIEW: " + label)
+    LOG("----------------------------------------")
+
+
+    # --------------------------------------------------------
+    # 基本情報
+    # --------------------------------------------------------
+
+    try:
+
+        LOG(
+            "Direction = "
+            + str(view.Direction)
+        )
+
+    except Exception as e:
+
+        LOG("Direction ERROR: " + str(e))
+
+
+    try:
+
+        LOG(
+            "X = "
+            + str(view.X)
+        )
+
+    except Exception as e:
+
+        LOG("X ERROR: " + str(e))
+
+
+    try:
+
+        LOG(
+            "Y = "
+            + str(view.Y)
+        )
+
+    except Exception as e:
+
+        LOG("Y ERROR: " + str(e))
+
+
+    try:
+
+        LOG(
+            "Scale = "
+            + str(view.Scale)
+        )
+
+    except Exception as e:
+
+        LOG("Scale ERROR: " + str(e))
+
+
+    # --------------------------------------------------------
+    # Visible
+    # --------------------------------------------------------
+
+    try:
+
+        visible_edges = list(
+            view.getVisibleEdges()
+        )
+
+        visible_count = len(
+            visible_edges
+        )
+
+        LOG(
+            "Visible Edges = "
+            + str(visible_count)
+        )
+
+    except Exception as e:
+
+        visible_edges = []
+        visible_count = 0
+
+        LOG(
+            "getVisibleEdges ERROR: "
+            + str(e)
+        )
+
+
+    # --------------------------------------------------------
+    # Hidden
+    # --------------------------------------------------------
+
+    try:
+
+        hidden_edges = list(
+            view.getHiddenEdges()
+        )
+
+        hidden_count = len(
+            hidden_edges
+        )
+
+        LOG(
+            "Hidden Edges = "
+            + str(hidden_count)
+        )
+
+    except Exception as e:
+
+        hidden_edges = []
+        hidden_count = 0
+
+        LOG(
+            "getHiddenEdges ERROR: "
+            + str(e)
+        )
+
+
+    after_data[label] = {
+
+        "visible": visible_count,
+
+        "hidden": hidden_count
+
+    }
+
+
+    # --------------------------------------------------------
+    # Edge種類
+    # --------------------------------------------------------
+
+    visible_types = {}
+
+    for edge in visible_edges:
+
+        try:
+
+            cname = type(edge.Curve).__name__
+
+            visible_types[cname] = (
+                visible_types.get(cname, 0) + 1
+            )
+
+        except Exception:
+            pass
+
+
+    hidden_types = {}
+
+    for edge in hidden_edges:
+
+        try:
+
+            cname = type(edge.Curve).__name__
+
+            hidden_types[cname] = (
+                hidden_types.get(cname, 0) + 1
+            )
+
+        except Exception:
+            pass
+
+
+    LOG(
+        "Visible Curve Types = "
+        + str(visible_types)
+    )
+
+    LOG(
+        "Hidden Curve Types = "
+        + str(hidden_types)
+    )
+
+    LOG("")
+
+
+# ============================================================
+# BEFORE / AFTER 比較
+# ============================================================
+
+LOG("")
+LOG("========================================")
+LOG("BEFORE / AFTER 比較")
+LOG("========================================")
+LOG("")
+
+
+for label in after_data:
+
+    before = before_data.get(
+        label,
+        {
+            "visible": 0,
+            "hidden": 0
+        }
+    )
+
+    after = after_data[label]
+
+    LOG("----------------------------------------")
+    LOG("VIEW: " + label)
+    LOG("----------------------------------------")
+
+    LOG(
+        "Visible : "
+        + str(before["visible"])
+        + " -> "
+        + str(after["visible"])
+    )
+
+    LOG(
+        "Hidden  : "
+        + str(before["hidden"])
+        + " -> "
+        + str(after["hidden"])
+    )
+
+    if (
+        before["visible"] != after["visible"]
+        or
+        before["hidden"] != after["hidden"]
+    ):
+
+        LOG("★★ RECOMPUTEによって変化しています")
+
+    else:
+
+        LOG("変化なし")
+
+
+# ============================================================
+# Direction確認
+# ============================================================
+
+LOG("")
+LOG("========================================")
+LOG("Direction確認")
+LOG("========================================")
+LOG("")
+
+
+for view in views:
+
+    try:
+
+        if view.TypeId != "TechDraw::DrawProjGroupItem":
+            continue
+
+        LOG(
+            str(view.Label)
+            + " : "
+            + str(view.Direction)
+        )
+
+    except Exception:
+        pass
+
+
+# ============================================================
+# DXF 寸法レイヤー統合
+#
+# *Dimension005
+# *Dimension006
+# *Dimension007
+#       ↓ キー
+#
+# Dimension005
+# Dimension006
+# Dimension007
+#       ↓
+#
+# 寸法
+#
+# ※ *DimensionXXX は絶対に変更しない
+# ============================================================
+
+LOG("")
+LOG("========================================")
+LOG("DXF 寸法レイヤー統合")
+LOG("========================================")
+LOG("")
+
+
+def merge_dimension_layers():
+
+    # --------------------------------------------------------
+    # DXF選択
+    # --------------------------------------------------------
+
+    input_file, _ = QtWidgets.QFileDialog.getOpenFileName(
+        None,
+        "寸法レイヤーを統合するDXFを選択",
+        "",
+        "DXF Files (*.dxf);;All Files (*)"
+    )
+
+    if not input_file:
+
+        LOG("DXFが選択されませんでした。")
+
+        return
+
+
+    LOG("入力DXF:")
+    LOG(input_file)
+    LOG("")
+
+
+    # --------------------------------------------------------
+    # 読み込み
+    # --------------------------------------------------------
+
+    try:
+
+        with open(
+            input_file,
+            "r",
+            encoding="cp932",
+            errors="replace"
+        ) as f:
+
+            lines = f.readlines()
+
+    except Exception as e:
+
+        LOG(
+            "DXF読み込みエラー: "
+            + str(e)
+        )
+
+        QtWidgets.QMessageBox.critical(
+            None,
+            "DXFエラー",
+            "DXFの読み込みに失敗しました。\n\n"
+            + str(e)
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # 改行を除去した値
+    # --------------------------------------------------------
+
+    values = []
+
+    for line in lines:
+
+        values.append(
+            line.rstrip("\r\n")
+        )
+
+
+    # --------------------------------------------------------
+    # *DimensionXXX を探す
+    #
+    # 例:
+    #
+    # *Dimension005
+    # *Dimension006
+    # *Dimension007
+    #
+    # ここで * が付いているものだけをキーにする
+    # --------------------------------------------------------
+
+    dimension_block_names = set()
+
+    for value in values:
+
+        if re.match(
+            r"^\*Dimension[0-9A-Za-z_]*$",
+            value
+        ):
+
+            dimension_block_names.add(value)
+
+
+    LOG(
+        "*Dimension系ブロック検出数 = "
+        + str(len(dimension_block_names))
+    )
+
+
+    if dimension_block_names:
+
+        for name in sorted(dimension_block_names):
+
+            LOG(
+                "  KEY = "
+                + name
+            )
+
+    else:
+
+        LOG("＊Dimension系ブロックがありません。")
+
+
+    LOG("")
+
+
+    # --------------------------------------------------------
+    # *DimensionXXX から通常のレイヤー名を作る
+    #
+    # *Dimension005
+    #       ↓
+    # Dimension005
+    #
+    # この名前を「寸法レイヤー候補」とする
+    # --------------------------------------------------------
+
+    dimension_layer_names = set()
+
+    for block_name in dimension_block_names:
+
+        layer_name = block_name[1:]
+
+        dimension_layer_names.add(layer_name)
+
+
+    LOG(
+        "寸法レイヤー候補数 = "
+        + str(len(dimension_layer_names))
+    )
+
+
+    for name in sorted(dimension_layer_names):
+
+        LOG(
+            "  "
+            + name
+            + " -> 寸法"
+        )
+
+
+    LOG("")
+
+
+    # --------------------------------------------------------
+    # 寸法レイヤーが無ければ終了
+    # --------------------------------------------------------
+
+    if not dimension_layer_names:
+
+        QtWidgets.QMessageBox.information(
+            None,
+            "寸法レイヤー統合",
+            "*DimensionXXX が見つかりませんでした。"
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # 既存DXFの各コードを確認して置換
+    #
+    # 対象:
+    #
+    #   8
+    #   Dimension005
+    #
+    #   8
+    #   Dimension006
+    #
+    # など
+    #
+    # そしてLAYER TABLEの
+    #
+    #   2
+    #   Dimension005
+    #
+    # も変更する。
+    #
+    # *Dimension005 は「2」の後ろにあっても
+    # 絶対に変更しない。
+    # --------------------------------------------------------
+
+    output_values = list(values)
+
+    entity_layer_changes = 0
+    layer_table_changes = 0
+
+
+    # --------------------------------------------------------
+    # セクション判定用
+    # --------------------------------------------------------
+
+    current_section = ""
+
+
+    i = 0
+
+    while i < len(values):
+
+        code = values[i].strip()
+
+
+        # ----------------------------------------------------
+        # SECTION名
+        # ----------------------------------------------------
+
+        if code == "2" and i + 1 < len(values):
+
+            next_value = values[i + 1].strip()
+
+            if next_value in (
+                "HEADER",
+                "CLASSES",
+                "TABLES",
+                "BLOCKS",
+                "ENTITIES",
+                "OBJECTS"
+            ):
+
+                current_section = next_value
+
+
+        # ----------------------------------------------------
+        # LAYER TABLE
+        #
+        # 2
+        # Dimension005
+        #
+        # などを「寸法」に変更
+        #
+        # *Dimension005 は候補に入っていないので
+        # ここでも変更されない。
+        # ----------------------------------------------------
+
+        if (
+            current_section == "TABLES"
+            and
+            code == "2"
+            and
+            i + 1 < len(values)
+        ):
+
+            name = values[i + 1].strip()
+
+            if name in dimension_layer_names:
+
+                output_values[i + 1] = "寸法"
+
+                layer_table_changes += 1
+
+
+        # ----------------------------------------------------
+        # ENTITYのレイヤー
+        #
+        # 8
+        # Dimension005
+        #
+        # ↓
+        #
+        # 8
+        # 寸法
+        #
+        # ----------------------------------------------------
+
+        if (
+            code == "8"
+            and
+            i + 1 < len(values)
+        ):
+
+            name = values[i + 1].strip()
+
+            if name in dimension_layer_names:
+
+                output_values[i + 1] = "寸法"
+
+                entity_layer_changes += 1
+
+
+        i += 1
+
+
+    # --------------------------------------------------------
+    # 既存の「寸法」レイヤーがあるか確認
+    # --------------------------------------------------------
+
+    has_dimension_layer = False
+
+    current_section = ""
+
+    i = 0
+
+    while i < len(output_values):
+
+        code = output_values[i].strip()
+
+        if code == "2" and i + 1 < len(output_values):
+
+            next_value = output_values[i + 1].strip()
+
+            if next_value in (
+                "HEADER",
+                "CLASSES",
+                "TABLES",
+                "BLOCKS",
+                "ENTITIES",
+                "OBJECTS"
+            ):
+
+                current_section = next_value
+
+
+        if (
+            current_section == "TABLES"
+            and
+            code == "2"
+            and
+            i + 1 < len(output_values)
+            and
+            output_values[i + 1].strip() == "寸法"
+        ):
+
+            has_dimension_layer = True
+            break
+
+
+        i += 1
+
+
+    # --------------------------------------------------------
+    # もし元々「寸法」レイヤーが無ければ、
+    # 最初に変換したDimensionXXXのLAYER定義を
+    # そのまま「寸法」にしているので通常は存在する。
+    # --------------------------------------------------------
+
+    LOG(
+        "LAYER定義変更 = "
+        + str(layer_table_changes)
+    )
+
+    LOG(
+        "エンティティ変更 = "
+        + str(entity_layer_changes)
+    )
+
+    LOG("")
+
+
+    # --------------------------------------------------------
+    # 不要になったDimensionXXXのLAYER定義を削除
+    #
+    # ここはLAYER TABLE内だけを対象。
+    #
+    # BLOCK_RECORDの
+    #
+    # *Dimension005
+    #
+    # BLOCKの
+    #
+    # *Dimension005
+    #
+    # などは絶対に削除しない。
+    # --------------------------------------------------------
+
+    filtered_values = []
+
+    current_section = ""
+
+    in_layer_table = False
+    skip_layer_record = False
+    layer_record_values = []
+
+
+    def flush_layer_record():
+
+        nonlocal filtered_values
+        nonlocal layer_record_values
+
+        if not layer_record_values:
+            return
+
+        record_text = "\n".join(layer_record_values)
+
+        # LAYERレコードの2コードの名前を取得
+        record_layer_name = None
+
+        for n in range(len(layer_record_values) - 1):
+
+            if layer_record_values[n].strip() == "2":
+
+                candidate = (
+                    layer_record_values[n + 1].strip()
+                )
+
+                if candidate:
+                    record_layer_name = candidate
+                    break
+
+
+        # 寸法に変更済みのレコードは残す
+        # DimensionXXXの古い重複レコードだけ削除
+        if (
+            record_layer_name is not None
+            and
+            record_layer_name in dimension_layer_names
+        ):
+
+            return
+
+        filtered_values.extend(
+            layer_record_values
+        )
+
+        layer_record_values = []
+
+
+    i = 0
+
+    while i < len(output_values):
+
+        value = output_values[i]
+        code = value.strip()
+
+
+        # SECTION判定
+        if (
+            code == "2"
+            and
+            i + 1 < len(output_values)
+        ):
+
+            next_value = output_values[i + 1].strip()
+
+            if next_value == "TABLES":
+
+                current_section = "TABLES"
+
+            elif next_value == "BLOCKS":
+
+                current_section = "BLOCKS"
+
+            elif next_value == "ENTITIES":
+
+                current_section = "ENTITIES"
+
+            elif next_value == "HEADER":
+
+                current_section = "HEADER"
+
+            elif next_value == "CLASSES":
+
+                current_section = "CLASSES"
+
+            elif next_value == "OBJECTS":
+
+                current_section = "OBJECTS"
+
+
+        # LAYER TABLE開始
+        if (
+            current_section == "TABLES"
+            and
+            code == "0"
+            and
+            i + 1 < len(output_values)
+            and
+            output_values[i + 1].strip() == "TABLE"
+        ):
+
+            # 直後のTABLE名を確認
+            j = i + 2
+
+            while (
+                j < len(output_values)
+                and
+                output_values[j].strip() == ""
+            ):
+                j += 1
+
+            # 2 / LAYERならLAYER TABLEとして処理
+            if (
+                j < len(output_values)
+                and
+                output_values[j].strip() == "2"
+                and
+                j + 1 < len(output_values)
+                and
+                output_values[j + 1].strip() == "LAYER"
+            ):
+
+                in_layer_table = True
+
+
+        # LAYER TABLE内
+        if in_layer_table:
+
+            # END TABで終了
+            if code == "0" and i + 1 < len(output_values):
+
+                next_value = output_values[i + 1].strip()
+
+                if next_value == "ENDTAB":
+
+                    flush_layer_record()
+
+                    filtered_values.append(value)
+
+                    i += 1
+
+                    filtered_values.append(
+                        output_values[i]
+                    )
+
+                    in_layer_table = False
+
+                    i += 1
+
+                    continue
+
+
+        # ----------------------------------------------------
+        # 通常処理
+        # ----------------------------------------------------
+
+        filtered_values.append(value)
+
+        i += 1
+
+
+    # --------------------------------------------------------
+    # ここまででLAYERレコードの重複削除は行わない。
+    #
+    # 安全性優先で、DimensionXXXを「寸法」に変更した
+    # 結果だけを保存する。
+    #
+    # 同じ名前のLAYERが複数残る可能性を避けるため、
+    # 後段で重複LAYERだけ整理する。
+    # --------------------------------------------------------
+
+    output_values = filtered_values
+
+
+    # --------------------------------------------------------
+    # LAYER TABLE内で「寸法」レコードが複数になっている場合、
+    # 2つ目以降を削除する。
+    #
+    # ただしBLOCKなど他の場所には触れない。
+    # --------------------------------------------------------
+
+    final_values = []
+
+    current_section = ""
+    layer_table_active = False
+    layer_record = []
+    in_dimension_layer_record = False
+    dimension_layer_seen = False
+
+
+    def flush_final_layer_record():
+
+        nonlocal final_values
+        nonlocal layer_record
+        nonlocal in_dimension_layer_record
+        nonlocal dimension_layer_seen
+
+        if not layer_record:
+            return
+
+        if in_dimension_layer_record:
+
+            if dimension_layer_seen:
+
+                # 2個目以降の「寸法」LAYERは削除
+                pass
+
+            else:
+
+                final_values.extend(
+                    layer_record
+                )
+
+                dimension_layer_seen = True
+
+        else:
+
+            final_values.extend(
+                layer_record
+            )
+
+        layer_record = []
+        in_dimension_layer_record = False
+
+
+    i = 0
+
+    while i < len(output_values):
+
+        code = output_values[i].strip()
+
+
+        # SECTION
+        if (
+            code == "2"
+            and
+            i + 1 < len(output_values)
+        ):
+
+            sec = output_values[i + 1].strip()
+
+            if sec in (
+                "HEADER",
+                "CLASSES",
+                "TABLES",
+                "BLOCKS",
+                "ENTITIES",
+                "OBJECTS"
+            ):
+
+                current_section = sec
+
+
+        # LAYER TABLE開始
+        if (
+            current_section == "TABLES"
+            and
+            code == "0"
+            and
+            i + 3 < len(output_values)
+            and
+            output_values[i + 1].strip() == "TABLE"
+            and
+            output_values[i + 2].strip() == "2"
+            and
+            output_values[i + 3].strip() == "LAYER"
+        ):
+
+            layer_table_active = True
+
+
+        # LAYER TABLE終了
+        if (
+            layer_table_active
+            and
+            code == "0"
+            and
+            i + 1 < len(output_values)
+            and
+            output_values[i + 1].strip() == "ENDTAB"
+        ):
+
+            flush_final_layer_record()
+
+            final_values.append(value)
+
+            i += 1
+
+            final_values.append(
+                output_values[i]
+            )
+
+            layer_table_active = False
+
+            i += 1
+
+            continue
+
+
+        # LAYER TABLEの各レコード
+        if layer_table_active:
+
+            if (
+                code == "0"
+                and
+                i + 1 < len(output_values)
+                and
+                output_values[i + 1].strip() == "LAYER"
+            ):
+
+                flush_final_layer_record()
+
+                layer_record = [
+                    output_values[i],
+                    output_values[i + 1]
+                ]
+
+                i += 2
+
+                # レコード内容を次の0まで集める
+                while i < len(output_values):
+
+                    if (
+                        output_values[i].strip() == "0"
+                    ):
+
+                        break
+
+                    layer_record.append(
+                        output_values[i]
+                    )
+
+                    i += 1
+
+
+                # レイヤー名確認
+                layer_name = None
+
+                for n in range(
+                    len(layer_record) - 1
+                ):
+
+                    if (
+                        layer_record[n].strip()
+                        == "2"
+                    ):
+
+                        layer_name = (
+                            layer_record[n + 1]
+                            .strip()
+                        )
+
+                        break
+
+
+                in_dimension_layer_record = (
+                    layer_name == "寸法"
+                )
+
+                continue
+
+
+        final_values.append(
+            output_values[i]
+        )
+
+        i += 1
+
+
+    flush_final_layer_record()
+
+
+    # --------------------------------------------------------
+    # 念のため、*DimensionXXX は変わっていないか確認
+    # --------------------------------------------------------
+
+    star_changed = False
+
+    for name in dimension_block_names:
+
+        if name not in final_values:
+
+            # 行単位の完全一致で存在確認
+            star_changed = True
+
+            LOG(
+                "警告: "
+                + name
+                + " が出力に見つかりません。"
+            )
+
+
+    # --------------------------------------------------------
+    # 出力ファイル名
+    # --------------------------------------------------------
+
+    base, ext = os.path.splitext(
+        input_file
+    )
+
+    output_file = (
+        base
+        + "_寸法統合"
+        + ext
+    )
+
+
+    # --------------------------------------------------------
+    # 保存
+    # --------------------------------------------------------
+
+    try:
+
+        with open(
+            output_file,
+            "w",
+            encoding="cp932",
+            errors="replace",
+            newline=""
+        ) as f:
+
+            for line in final_values:
+
+                f.write(
+                    line
+                    + "\r\n"
+                )
+
+
+    except Exception as e:
+
+        LOG(
+            "DXF保存エラー: "
+            + str(e)
+        )
+
+        QtWidgets.QMessageBox.critical(
+            None,
+            "DXF保存エラー",
+            "DXFの保存に失敗しました。\n\n"
+            + str(e)
+        )
+
+        return
+
+
+    # --------------------------------------------------------
+    # 完了
+    # --------------------------------------------------------
+
+    LOG("")
+    LOG("========================================")
+    LOG("寸法レイヤー統合完了")
+    LOG("========================================")
+    LOG("")
+
+    LOG(
+        "変更前の寸法レイヤー候補 = "
+        + str(len(dimension_layer_names))
+    )
+
+    LOG(
+        "LAYER変更数 = "
+        + str(layer_table_changes)
+    )
+
+    LOG(
+        "エンティティ変更数 = "
+        + str(entity_layer_changes)
+    )
+
+    LOG("")
+
+    LOG("出力DXF:")
+    LOG(output_file)
+
+    LOG("")
+
+    if star_changed:
+
+        LOG(
+            "★★ 注意: *Dimension系ブロックの確認で"
+            "問題が検出されました。"
+        )
+
+    else:
+
+        LOG(
+            "★ *Dimension系ブロック名は維持されています。"
+        )
+
+
+    QtWidgets.QMessageBox.information(
+        None,
+        "寸法レイヤー統合完了",
+        "寸法レイヤーを「寸法」に統合しました。\n\n"
+        "変更したレイヤー数: "
+        + str(len(dimension_layer_names))
+        + "\n\n"
+        "出力ファイル:\n"
+        + output_file
+    )
+
+
+# ============================================================
+# DXF処理実行
+# ============================================================
+
+try:
+
+    merge_dimension_layers()
+
+except Exception as e:
+
+    LOG("")
+    LOG("========================================")
+    LOG("DXF処理エラー")
+    LOG("========================================")
+    LOG("")
+    LOG(str(e))
+
+    QtWidgets.QMessageBox.critical(
+        None,
+        "DXF処理エラー",
+        str(e)
+    )
+
+
+# ============================================================
+# 最終結果
+# ============================================================
+
+LOG("")
+LOG("========================================")
+LOG("診断終了")
+LOG("========================================")
+LOG("")
+
+LOG(
+    "BEFORE DATA = "
+    + str(before_data)
+)
+
+LOG(
+    "AFTER DATA  = "
+    + str(after_data)
+)
+
+
+# ============================================================
+# ポップアップ
+# ============================================================
+
+dialog = QtWidgets.QDialog()
+
+dialog.setWindowTitle(
+    "TechDraw View 診断"
+)
+
+dialog.resize(
+    950,
+    750
+)
+
+layout = QtWidgets.QVBoxLayout(
+    dialog
+)
+
+
+summary = QtWidgets.QLabel(
+    "<b>TechDraw View 診断完了</b><br><br>"
+    "コンソール出力と、このマクロの出力を比較してください。"
+)
+
+summary.setWordWrap(True)
+
+layout.addWidget(
+    summary
+)
+
+
+text = QtWidgets.QPlainTextEdit()
+
+text.setReadOnly(True)
+
+text.setPlainText(
+    "\n".join(log)
+)
+
+layout.addWidget(
+    text
+)
+
+
+button = QtWidgets.QPushButton(
+    "閉じる"
+)
+
+button.clicked.connect(
+    dialog.accept
+)
+
+layout.addWidget(
+    button
+)
+
+
+dialog.exec()

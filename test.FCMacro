@@ -1,0 +1,384 @@
+import os
+import math
+import FreeCAD as App
+import ezdxf
+
+from PySide import QtWidgets, QtCore
+
+
+# ============================================================
+# FreeCAD
+# ============================================================
+
+doc = App.ActiveDocument
+
+if doc is None:
+    raise Exception("ActiveDocumentがありません")
+
+
+# ============================================================
+# デスクトップ
+# ============================================================
+
+desktop = QtCore.QStandardPaths.writableLocation(
+    QtCore.QStandardPaths.DesktopLocation
+)
+
+if not desktop or not os.path.exists(desktop):
+    desktop = os.path.expanduser("~")
+
+
+# ============================================================
+# 保存先
+# ============================================================
+
+filename, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+    None,
+    "引出線DXF保存",
+    os.path.join(
+        desktop,
+        doc.Label + "_Leader_Arrow_Y反転.dxf"
+    ),
+    "DXF Files (*.dxf)"
+)
+
+if not filename:
+    raise Exception("保存キャンセル")
+
+if not filename.lower().endswith(".dxf"):
+    filename += ".dxf"
+
+filename = filename.replace("\\", "/")
+
+
+# ============================================================
+# DXF作成
+# ============================================================
+
+dxf = ezdxf.new("R2010")
+msp = dxf.modelspace()
+
+
+# ============================================================
+# レイヤー
+# ============================================================
+
+if "Leader" not in dxf.layers:
+
+    dxf.layers.add(
+        "Leader",
+        color=1,
+        linetype="CONTINUOUS"
+    )
+
+
+# ============================================================
+# 設定
+# ============================================================
+
+ARROW_LENGTH = 1.0
+ARROW_WIDTH = 0.5
+
+
+# ============================================================
+# 矢印作成
+# ============================================================
+
+def add_arrowhead(msp, tip, direction):
+
+    dx = direction[0]
+    dy = direction[1]
+
+    length = math.sqrt(
+        dx * dx +
+        dy * dy
+    )
+
+    if length < 0.000001:
+        return
+
+    # 単位ベクトル
+    ux = dx / length
+    uy = dy / length
+
+    # 直角方向
+    px = -uy
+    py = ux
+
+    # 矢印の後端中心
+    back_x = (
+        tip[0] +
+        ux * ARROW_LENGTH
+    )
+
+    back_y = (
+        tip[1] +
+        uy * ARROW_LENGTH
+    )
+
+    # 左側
+    left = (
+        back_x +
+        px * ARROW_WIDTH,
+        back_y +
+        py * ARROW_WIDTH
+    )
+
+    # 右側
+    right = (
+        back_x -
+        px * ARROW_WIDTH,
+        back_y -
+        py * ARROW_WIDTH
+    )
+
+    # 左側
+    msp.add_line(
+        tip,
+        left,
+        dxfattribs={
+            "layer": "Leader"
+        }
+    )
+
+    # 右側
+    msp.add_line(
+        tip,
+        right,
+        dxfattribs={
+            "layer": "Leader"
+        }
+    )
+
+    print(
+        "矢印:",
+        "TIP =", tip,
+        "LEFT =", left,
+        "RIGHT =", right
+    )
+
+
+# ============================================================
+# 引出線検索
+# ============================================================
+
+leaders = []
+
+for obj in doc.Objects:
+
+    if obj.TypeId == "TechDraw::DrawLeaderLine":
+
+        if not obj.Visibility:
+            continue
+
+        leaders.append(obj)
+
+
+print("========================================")
+print("TechDraw 引出線 + 1mm矢印 DXF")
+print("Y方向反転テスト")
+print("========================================")
+
+print("引出線数:", len(leaders))
+
+
+# ============================================================
+# 引出線出力
+# ============================================================
+
+created_lines = 0
+created_arrows = 0
+
+
+for leader in leaders:
+
+    print("")
+    print("----------------------------------------")
+
+    print("引出線:", leader.Name)
+    print("Label :", leader.Label)
+
+    wp = leader.WayPoints
+
+    print("WayPoints:", len(wp))
+
+    if len(wp) < 2:
+
+        print("WayPoints不足")
+        continue
+
+
+    # ========================================================
+    # Leader X / Y
+    #
+    # X.Value / Y.Value でQuantityを数値化
+    # ========================================================
+
+    base_x = leader.X.Value
+    base_y = leader.Y.Value
+
+
+    print("Base X:", base_x)
+    print("Base Y:", base_y)
+
+
+    # ========================================================
+    # WayPoints → DXF座標
+    #
+    # ★ Yを反転
+    #
+    # FreeCAD:
+    #     Y +
+    #
+    # DXF:
+    #     今回は Y -
+    #
+    # ========================================================
+
+    points = []
+
+
+    for i, p in enumerate(wp):
+
+        x = (
+            base_x +
+            float(p.x)
+        )
+
+        y = (
+            base_y -
+            float(p.y)
+        )
+
+        point = (
+            x,
+            y
+        )
+
+        points.append(point)
+
+        print(
+            "POINT",
+            i,
+            "=",
+            point
+        )
+
+
+    # ========================================================
+    # 引出線本体
+    # ========================================================
+
+    for i in range(
+        len(points) - 1
+    ):
+
+        p1 = points[i]
+        p2 = points[i + 1]
+
+        msp.add_line(
+            p1,
+            p2,
+            dxfattribs={
+                "layer": "Leader"
+            }
+        )
+
+        created_lines += 1
+
+        print(
+            "LINE",
+            i,
+            ":",
+            p1,
+            "→",
+            p2
+        )
+
+
+    # ========================================================
+    # 開始点の矢印
+    #
+    # START → 次のWayPoint
+    #
+    # ========================================================
+
+    start = points[0]
+    next_point = points[1]
+
+    direction = (
+        next_point[0] - start[0],
+        next_point[1] - start[1]
+    )
+
+
+    print("")
+    print("START:", start)
+    print("NEXT :", next_point)
+    print("矢印方向:", direction)
+
+
+    add_arrowhead(
+        msp,
+        start,
+        direction
+    )
+
+    created_arrows += 1
+
+
+# ============================================================
+# DXFコードページ
+# ============================================================
+
+dxf.header["$DWGCODEPAGE"] = "ANSI_932"
+
+
+# ============================================================
+# 保存
+# ============================================================
+
+print("")
+print("========================================")
+print("DXF保存中...")
+print("========================================")
+
+dxf.saveas(filename)
+
+
+# ============================================================
+# 完了
+# ============================================================
+
+print("")
+print("========================================")
+print("DXF出力完了")
+print("========================================")
+
+print("引出線:", len(leaders))
+print("生成LINE:", created_lines)
+print("生成矢印:", created_arrows)
+print("保存先:", filename)
+
+
+# ============================================================
+# 完了ダイアログ
+# ============================================================
+
+QtWidgets.QMessageBox.information(
+    None,
+    "DXF出力完了",
+    "引出線＋開始点1mm矢印を出力しました。\n\n"
+    "Y方向を反転しています。\n\n"
+    "引出線: "
+    + str(len(leaders))
+    + "\n"
+    "生成LINE: "
+    + str(created_lines)
+    + "\n"
+    "矢印: "
+    + str(created_arrows)
+    + "\n\n"
+    "保存先:\n"
+    + filename
+)

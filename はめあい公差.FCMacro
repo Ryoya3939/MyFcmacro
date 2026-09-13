@@ -1,0 +1,236 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Draft
+from PySide import QtCore, QtWidgets
+
+class ToleranceTextContinuousTool(QtWidgets.QDialog):
+    def __init__(self):
+        super(ToleranceTextContinuousTool, self).__init__()
+        self.setWindowTitle("寸法公差＆はめあい 連続配置ツール")
+        self.resize(380, 530)
+        self.callback_id = None
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+
+        # 1. はめあい公差（追加機能）
+        layout.addWidget(QtWidgets.QLabel("はめあい公差 (例: 7h, 7H / 不要なら空欄):", self))
+        self.txt_fit = QtWidgets.QLineEdit(self)
+        self.txt_fit.setText("7h")
+        layout.addWidget(self.txt_fit)
+
+        # 2. 公差パターンの選択
+        layout.addWidget(QtWidgets.QLabel("公差パターン選択 (はめあいの左側に配置):", self))
+        self.combo_pattern = QtWidgets.QComboBox(self)
+        self.combo_pattern.addItems([
+            "± パターン (縦に2行 + / - 同じ値)",
+            "+ / + パターン (縦に2行)",
+            "+ / - パターン (縦に2行)",
+            "- / - パターン (縦に2行)"
+        ])
+        self.combo_pattern.setCurrentIndex(0)
+        self.combo_pattern.currentIndexChanged.connect(self.update_input_fields)
+        layout.addWidget(self.combo_pattern)
+
+        # 3. 公差値の入力欄
+        self.lbl_val1 = QtWidgets.QLabel("公差値 (±共通):", self)
+        self.txt_val1 = QtWidgets.QLineEdit(self)
+        self.txt_val1.setText("0.1")
+        
+        self.lbl_val2 = QtWidgets.QLabel("下側公差値:", self)
+        self.txt_val2 = QtWidgets.QLineEdit(self)
+        self.txt_val2.setText("0.05")
+        
+        layout.addWidget(self.lbl_val1)
+        layout.addWidget(self.txt_val1)
+        layout.addWidget(self.lbl_val2)
+        layout.addWidget(self.txt_val2)
+        
+        self.update_input_fields()
+
+        # 4. 文字の大きさ設定 (公差の基準サイズ)
+        layout.addWidget(QtWidgets.QLabel("公差の文字の大きさ (FontSize):", self))
+        self.txt_text_size = QtWidgets.QLineEdit(self)
+        self.txt_text_size.setText("1.0")
+        layout.addWidget(self.txt_text_size)
+
+        # 5. 表示カラー
+        layout.addWidget(QtWidgets.QLabel("表示カラー:", self))
+        self.combo_color = QtWidgets.QComboBox(self)
+        self.combo_color.addItems(["黒色（図面標準）", "緑色", "赤色", "青色", "白色"])
+        self.combo_color.setCurrentText("黒色（図面標準）")
+        layout.addWidget(self.combo_color)
+
+        layout.addSpacing(15)
+
+        # 6. 実行・終了ボタン
+        self.btn_run = QtWidgets.QPushButton("クリック配置モード開始", self)
+        self.btn_run.setStyleSheet("font-weight: bold; height: 35px; background-color: #2b579a; color: white;")
+        self.btn_run.clicked.connect(self.start_spatial_click_mode)
+        layout.addWidget(self.btn_run)
+        
+        self.btn_stop = QtWidgets.QPushButton("配置モード終了（完了）", self)
+        self.btn_stop.setStyleSheet("font-weight: bold; height: 30px;")
+        self.btn_stop.clicked.connect(self.stop_spatial_click_mode)
+        self.btn_stop.setEnabled(False)
+        layout.addWidget(self.btn_stop)
+        
+        self.lbl_status = QtWidgets.QLabel("状態: 待機中", self)
+        self.lbl_status.setStyleSheet("color: gray; font-weight: bold;")
+        layout.addWidget(self.lbl_status)
+
+    def update_input_fields(self):
+        idx = self.combo_pattern.currentIndex()
+        if idx == 0:
+            self.lbl_val1.setText("公差値 (±共通):")
+            self.txt_val1.setText("0.1")
+            self.lbl_val2.hide()
+            self.txt_val2.hide()
+        else:
+            self.lbl_val2.show()
+            self.txt_val2.show()
+            if idx == 1:
+                self.lbl_val1.setText("上側公差値 (+):")
+                self.lbl_val2.setText("下側公差値 (+):")
+                self.txt_val1.setText("0.1")
+                self.txt_val2.setText("0.05")
+            elif idx == 2:
+                self.lbl_val1.setText("上側公差値 (+):")
+                self.lbl_val2.setText("下側公差値 (-):")
+                self.txt_val1.setText("0.1")
+                self.txt_val2.setText("0.05")
+            elif idx == 3:
+                self.lbl_val1.setText("上側公差値 (-):")
+                self.lbl_val2.setText("下側公差値 (-):")
+                self.txt_val1.setText("0.05")
+                self.txt_val2.setText("0.1")
+
+    def start_spatial_click_mode(self):
+        try:
+            self.text_size = float(self.txt_text_size.text())
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "エラー", "文字サイズには数値を入力してください。")
+            return
+            
+        color_name = self.combo_color.currentText()
+        if color_name == "赤色": self.my_color = (1.0, 0.0, 0.0, 1.0)
+        elif color_name == "青色": self.my_color = (0.0, 0.0, 1.0, 1.0)
+        elif color_name == "白色": self.my_color = (1.0, 1.0, 1.0, 1.0)
+        elif color_name == "緑色": self.my_color = (0.0, 1.0, 0.0, 1.0)
+        else: self.my_color = (0.0, 0.0, 0.0, 1.0)
+
+        if self.callback_id is None:
+            self.view = Gui.ActiveDocument.ActiveView
+            self.callback_id = self.view.addEventCallback("SoMouseButtonEvent", self.popup_at_click)
+            
+        self.btn_run.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.lbl_status.setText("状態: 連続配置待ちです（画面を連続クリック可能）")
+        self.lbl_status.setStyleSheet("color: blue; font-weight: bold;")
+
+    def stop_spatial_click_mode(self):
+        if self.callback_id is not None:
+            self.view.removeEventCallback("SoMouseButtonEvent", self.callback_id)
+            self.callback_id = None
+        
+        self.btn_run.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.lbl_status.setText("状態: 配置を終了しました")
+        self.lbl_status.setStyleSheet("color: green; font-weight: bold;")
+        self.accept()
+
+    def popup_at_click(self, dictionary):
+        if dictionary["State"] == "DOWN" and dictionary["Button"] == "BUTTON1":
+            
+            pos_x = dictionary["Position"]
+            pos_y = dictionary["Position"]
+            p_click = self.view.getPoint(pos_x, pos_y)
+
+            if not p_click:
+                cx, cy, cz = 0.0, 0.0, 0.0
+            else:
+                cx, cy, cz = p_click.x, p_click.y, p_click.z
+
+            doc = App.ActiveDocument if App.ActiveDocument else App.newDocument("Tolerance_Doc")
+
+            idx = self.combo_pattern.currentIndex()
+            val1 = self.txt_val1.text().strip()
+            val2 = self.txt_val2.text().strip()
+            fit_str = self.txt_fit.text().strip()
+            
+            lines_to_draw = []
+            if idx == 0:
+                lines_to_draw.append(f"+{val1}")
+                lines_to_draw.append(f"-{val1}")
+            elif idx == 1:
+                lines_to_draw.append(f"+{val1}")
+                lines_to_draw.append(f"+{val2}")
+            elif idx == 2:
+                lines_to_draw.append(f"+{val1}")
+                lines_to_draw.append(f"-{val2}")
+            elif idx == 3:
+                lines_to_draw.append(f"-{val1}")
+                lines_to_draw.append(f"-{val2}")
+
+            # 行間の計算
+            line_spacing = self.text_size * 1.25
+
+            # 1. まず左側の縦2行の数値公差を描画
+            for r_idx, text_str in enumerate(lines_to_draw):
+                target_y = cy + (line_spacing / 4.0) - (r_idx * line_spacing)
+
+                text_obj = Draft.make_text(
+                    string=text_str,
+                    placement=App.Placement(App.Vector(cx, target_y, cz), App.Rotation(0.0, 0.0, 0.0, 1.0))
+                )
+                
+                if hasattr(text_obj, "ViewObject") and text_obj.ViewObject:
+                    text_obj.ViewObject.TextColor = self.my_color
+                    text_obj.ViewObject.FontSize = self.text_size
+
+                Draft.autogroup(text_obj)
+
+            # 2. 【新機能】はめあい公差文字列が入力されている場合、右側に1スペース開けて2倍サイズで描画
+            if fit_str:
+                # 文字数に合わせて右側へのズレ幅（オフセット）を自動調整
+                # 公差文字列の長さ（例: "+0.1" は4文字）から安全なX距離を算出
+                max_chars = max(len(s) for s in lines_to_draw)
+                # 1文字あたりの幅をフォントサイズのおよそ0.75倍とし、さらに1スペース分(0.5倍)を追加
+                fit_offset_x = (max_chars * self.text_size * 0.75) + (self.text_size * 0.5)
+                
+                fit_cx = cx + fit_offset_x
+                # 2倍サイズ文字が縦2行の中央に綺麗に揃うよう、Y座標の基準をクリック中心に設定
+                fit_cy = cy - (self.text_size * 0.5) 
+                
+                fit_obj = Draft.make_text(
+                    string=fit_str,
+                    placement=App.Placement(App.Vector(fit_cx, fit_cy, cz), App.Rotation(0.0, 0.0, 0.0, 1.0))
+                )
+                
+                if hasattr(fit_obj, "ViewObject") and fit_obj.ViewObject:
+                    fit_obj.ViewObject.TextColor = self.my_color
+                    # サイズをご要望通り「2倍」に設定
+                    fit_obj.ViewObject.FontSize = self.text_size * 1.5
+
+                Draft.autogroup(fit_obj)
+            
+            doc.recompute()
+            Gui.updateGui()
+
+    def closeEvent(self, event):
+        if self.callback_id is not None:
+            self.view.removeEventCallback("SoMouseButtonEvent", self.callback_id)
+            self.callback_id = None
+        event.accept()
+
+if 'current_tolerance_dialog' in globals():
+    try:
+        current_tolerance_dialog.close()
+    except:
+        pass
+
+current_tolerance_dialog = ToleranceTextContinuousTool()
+current_tolerance_dialog.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint)
+current_tolerance_dialog.show()

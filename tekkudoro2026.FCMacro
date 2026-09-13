@@ -1,0 +1,48 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+def get_view_shape(v_obj):
+    if hasattr(v_obj, "getFeatShape"):
+        return v_obj.getFeatShape()
+    elif hasattr(v_obj, "Source") and v_obj.Source:
+        if hasattr(v_obj.Source, "Shape"):
+            return v_obj.Source.Shape
+    return None
+def select_all_techdraw_vertices():
+    doc = App.activeDocument()
+    if not doc:
+        App.Console.PrintError("ドキュメントが開かれていません。\n")
+        return
+    page = None
+    target_views = []
+    view = Gui.activeView()
+    if hasattr(view, "getPage"):
+        page = view.getPage()
+    if not page:
+        for obj in doc.Objects:
+            if obj.isDerivedFrom("TechDraw::DrawPage"):
+                page = obj
+                break
+    if not page:
+        App.Console.PrintError("TechDrawページが見つかりません。\n")
+        return
+    for v in page.Views:
+        if v.isDerivedFrom("TechDraw::DrawViewPart") or v.isDerivedFrom("TechDraw::DrawProjGroupItem"):
+            target_views.append(v)
+        elif v.isDerivedFrom("TechDraw::DrawProjGroup"):
+            for child in v.OutList:
+                if child.isDerivedFrom("TechDraw::DrawProjGroupItem"):
+                    target_views.append(child)
+    Gui.Selection.clearSelection()
+    count = 0
+    for v_obj in target_views:
+        shape = get_view_shape(v_obj)
+        if not shape or not hasattr(shape, "Vertexes"):
+            continue
+        for i in range(len(shape.Vertexes)):
+            try:
+                Gui.Selection.addSelection(v_obj, f"Vertex{i+1}")
+                count += 1
+            except Exception:
+                pass
+    App.Console.PrintMessage(f"完了: {count} 個の頂点を選択しました。\n")
+select_all_techdraw_vertices()

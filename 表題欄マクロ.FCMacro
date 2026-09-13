@@ -1,0 +1,220 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import Draft
+import math
+from PySide import QtCore, QtWidgets
+
+class TitleBlockGeneratorTextTool(QtWidgets.QDialog):
+    def __init__(self):
+        # 【修正】親ウィンドウ(Gui.getMainWindow)を外して独立させ、コンソールのロックを防ぐ
+        super(TitleBlockGeneratorTextTool, self).__init__()
+        self.setWindowTitle("可変表題欄作成（文字入れ・個数チェック付き）")
+        self.resize(360, 520)
+        self.callback_id = None
+        
+        # 画面を閉じたら即座にメモリとフォーカスを解放するQt属性
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+
+        # 1. 用紙サイズの選択
+        layout.addWidget(QtWidgets.QLabel("設置する用紙サイズ設定:", self))
+        self.combo_size = QtWidgets.QComboBox(self)
+        self.combo_size.addItems(["A3用紙用 (420)", "A4用紙用 (297)"])
+        self.combo_size.setCurrentIndex(0)
+        layout.addWidget(self.combo_size)
+
+        # 2. 表題欄の個数
+        layout.addWidget(QtWidgets.QLabel("表題欄の個数 (マスの数):", self))
+        self.txt_title_count = QtWidgets.QLineEdit(self)
+        self.txt_title_count.setText("4")
+        layout.addWidget(self.txt_title_count)
+
+        # 2.5. 流し込むテキストの入力欄
+        layout.addWidget(QtWidgets.QLabel("表題欄に書く文字 (1マス1行で入力):", self))
+        self.txt_content = QtWidgets.QPlainTextEdit(self)
+        self.txt_content.setPlainText("製図: 〇〇\n日付: 2026/07/05\n尺度: 1:1\n図番: CAD-001")
+        layout.addWidget(self.txt_content)
+
+        # 2.6. 文字の大きさ設定
+        layout.addWidget(QtWidgets.QLabel("文字の大きさ (FontSize):", self))
+        self.txt_text_size = QtWidgets.QLineEdit(self)
+        self.txt_text_size.setText("3.5")
+        layout.addWidget(self.txt_text_size)
+
+        # 3. 輪郭線の余白
+        layout.addWidget(QtWidgets.QLabel("内枠の余白幅 (mm):", self))
+        self.combo_margin = QtWidgets.QComboBox(self)
+        self.combo_margin.addItems(["10.0", "5.0"])
+        self.combo_margin.setCurrentText("10.0")
+        layout.addWidget(self.combo_margin)
+
+        # 4. 格子線の太さ
+        layout.addWidget(QtWidgets.QLabel("線の太さ:", self))
+        self.txt_line_width = QtWidgets.QLineEdit(self)
+        self.txt_line_width.setText("1.0")
+        layout.addWidget(self.txt_line_width)
+
+        # 5. 表示カラー
+        layout.addWidget(QtWidgets.QLabel("表示カラー:", self))
+        self.combo_color = QtWidgets.QComboBox(self)
+        self.combo_color.addItems(["黒色（図面標準）", "緑色", "赤色", "青色", "白色"])
+        self.combo_color.setCurrentText("黒色（図面標準）")
+        layout.addWidget(self.combo_color)
+
+        layout.addSpacing(15)
+
+        # 6. 実行ボタン
+        self.btn_run = QtWidgets.QPushButton("クリック位置を右下として作成", self)
+        self.btn_run.setStyleSheet("font-weight: bold; height: 35px; background-color: #2b579a; color: white;")
+        self.btn_run.clicked.connect(self.start_spatial_click_mode)
+        layout.addWidget(self.btn_run)
+        
+        self.lbl_status = QtWidgets.QLabel("※ボタンを押した後、配置したい【右下角】をクリック", self)
+        self.lbl_status.setStyleSheet("color: blue; font-weight: bold;")
+        layout.addWidget(self.lbl_status)
+
+    def start_spatial_click_mode(self):
+        try:
+            self.line_w = float(self.txt_line_width.text())
+            self.margin = float(self.combo_margin.currentText())
+            self.title_count = int(self.txt_title_count.text())
+            self.text_size = float(self.txt_text_size.text())
+            if self.title_count < 0: self.title_count = 0
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "エラー", "数値を入れてください。")
+            return
+            
+        raw_text = self.txt_content.toPlainText().strip()
+        self.text_lines = [line for line in raw_text.split('\n') if line.strip() != ""] if raw_text else []
+        
+        if len(self.text_lines) != self.title_count:
+            QtWidgets.QMessageBox.critical(
+                self, 
+                "個数エラー", 
+                f"テキストの数が合いません。\n\n現在の設定：\n表題欄のマス数: {self.title_count}個\n入力されたテキストの数: {len(self.text_lines)}個"
+            )
+            return
+
+        self.size_idx = self.combo_size.currentIndex()
+        
+        color_name = self.combo_color.currentText()
+        if color_name == "赤色": self.my_color = (1.0, 0.0, 0.0, 1.0)
+        elif color_name == "青色": self.my_color = (0.0, 0.0, 1.0, 1.0)
+        elif color_name == "白色": self.my_color = (1.0, 1.0, 1.0, 1.0)
+        elif color_name == "緑色": self.my_color = (0.0, 1.0, 0.0, 1.0)
+        else: self.my_color = (0.0, 0.0, 0.0, 1.0)
+
+        if self.callback_id is None:
+            self.view = Gui.ActiveDocument.ActiveView
+            self.callback_id = self.view.addEventCallback("SoMouseButtonEvent", self.popup_at_click)
+            
+        self.btn_run.setEnabled(False)
+        self.btn_run.setText("3D画面をクリックしてください...")
+        self.lbl_status.setText("状態: 空間クリック待ちです")
+
+    def popup_at_click(self, dictionary):
+        if dictionary["State"] == "DOWN" and dictionary["Button"] == "BUTTON1":
+            
+            if self.callback_id is not None:
+                self.view.removeEventCallback("SoMouseButtonEvent", self.callback_id)
+                self.callback_id = None
+
+            pos_x = dictionary["Position"]
+            pos_y = dictionary["Position"]
+            p_click = self.view.getPoint(pos_x, pos_y)
+
+            if not p_click:
+                rx, by, cz = 0.0, 0.0, 0.0
+            else:
+                rx, by, cz = p_click.x, p_click.y, p_click.z
+
+            doc = App.ActiveDocument if App.ActiveDocument else App.newDocument("JIS_TitleBlock")
+
+            title_w = 60.0
+            title_h = 15.0
+            
+            paper_w = 420.0 if self.size_idx == 0 else 297.0
+            inner_width_total = paper_w - (self.margin * 2.0)
+            
+            virtual_left_x = rx - inner_width_total
+            center_x_limit = virtual_left_x + (inner_width_total / 2.0)
+            
+            max_cols = int((rx - center_x_limit) // title_w)
+            if max_cols <= 0: max_cols = 1
+
+            title_edges = []
+            
+            for index in range(self.title_count):
+                col = index % max_cols
+                row = index // max_cols
+                
+                box_rx = rx - (col * title_w)
+                box_lx = box_rx - title_w
+                box_by = by + (row * title_h)
+                box_ty = box_by + title_h
+                
+                bp1 = App.Vector(box_lx, box_by, cz)
+                bp2 = App.Vector(box_rx, box_by, cz)
+                bp3 = App.Vector(box_rx, box_ty, cz)
+                bp4 = App.Vector(box_lx, box_ty, cz)
+                
+                title_edges.append(Part.makeLine(bp1, bp4))
+                title_edges.append(Part.makeLine(bp4, bp3))
+                title_edges.append(Part.makeLine(bp3, bp2))
+                title_edges.append(Part.makeLine(bp2, bp1))
+
+                tx = box_lx + 4.0
+                ty = box_by + (title_h / 2.0) - (self.text_size / 2.0)
+                
+                current_text = self.text_lines[index]
+                text_obj = Draft.make_text(
+                    string=current_text,
+                    placement=App.Placement(App.Vector(tx, ty, cz), App.Rotation(0.0, 0.0, 0.0, 1.0))
+                )
+                
+                if hasattr(text_obj, "ViewObject") and text_obj.ViewObject:
+                    text_obj.ViewObject.TextColor = self.my_color
+                    text_obj.ViewObject.FontSize = self.text_size
+                    if hasattr(text_obj.ViewObject, "MarkerColor"):
+                        text_obj.ViewObject.MarkerColor = self.my_color
+                    if hasattr(text_obj.ViewObject, "PointColor"):
+                        text_obj.ViewObject.PointColor = self.my_color
+
+                Draft.autogroup(text_obj)
+                doc.recompute()
+
+            title_compound = Part.makeCompound(title_edges)
+            title_obj = doc.addObject("Part::Feature", "JIS_TitleBlock_可変表題欄")
+            title_obj.Shape = title_compound
+
+            if hasattr(title_obj, "ViewObject") and title_obj.ViewObject:
+                title_obj.ViewObject.LineWidth = self.line_w
+                title_obj.ViewObject.LineColor = self.my_color
+
+            Draft.autogroup(title_obj)
+            doc.recompute()
+            
+            Gui.updateGui()
+            self.accept() # 安全にダイアログを閉じてフォーカスを返す
+
+    def closeEvent(self, event):
+        if self.callback_id is not None:
+            self.view.removeEventCallback("SoMouseButtonEvent", self.callback_id)
+            self.callback_id = None
+        event.accept()
+
+# 【重要】コンソールロックを絶対に起こさない、ノンモーダルでの安全起動マクロ記述
+if 'current_title_block_dialog' in globals():
+    try:
+        current_title_block_dialog.close()
+    except:
+        pass
+
+current_title_block_dialog = TitleBlockGeneratorTextTool()
+# 画面の手前に出しつつ、FreeCAD本体の操作権（コンソール）を奪わない設定
+current_title_block_dialog.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint)
+current_title_block_dialog.show()

@@ -1,0 +1,163 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import Draft
+from PySide import QtCore, QtWidgets
+
+class PerfectDraftCenterlineTool(QtWidgets.QDialog):
+    def __init__(self):
+        super(PerfectDraftCenterlineTool, self).__init__(None)
+        self.setWindowTitle("サークル中心線自動作成（Draft連動版）")
+        self.resize(360, 320)
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        self.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Window)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+
+        # 1. はみ出し量 / サイズ設定
+        layout.addWidget(QtWidgets.QLabel("中心からの線長（または追加はみ出し量） [mm]:", self))
+        self.txt_offset = QtWidgets.QLineEdit(self)
+        self.txt_offset.setText("10.0")
+        layout.addWidget(self.txt_offset)
+
+        # 1.5 サイズ計算の基準選択
+        layout.addWidget(QtWidgets.QLabel("線長の計算基準:", self))
+        self.combo_calc_base = QtWidgets.QComboBox(self)
+        self.combo_calc_base.addItems([
+            "入力された値をそのまま全長(半径分)にする",
+            "円の半径 ＋ 入力された値をはみ出させる"
+        ])
+        self.combo_calc_base.setCurrentIndex(1)
+        layout.addWidget(self.combo_calc_base)
+        
+        # 2. 線の太さ
+        layout.addWidget(QtWidgets.QLabel("線の太さ (LineWidth):", self))
+        self.txt_line_width = QtWidgets.QLineEdit(self)
+        self.txt_line_width.setText("1.0")
+        layout.addWidget(self.txt_line_width)
+
+        # 3. 線種選択
+        layout.addWidget(QtWidgets.QLabel("線種（Style）の選択:", self))
+        self.combo_style = QtWidgets.QComboBox(self)
+        self.combo_style.addItems(["実線 (Continuous)", "ダッシュ線 (Dashed)", "1点鎖線 (Dashdot)"])
+        self.combo_style.setCurrentIndex(2) # デフォルトを1点鎖線に
+        layout.addWidget(self.combo_style)
+
+        # 4. 表示カラー
+        layout.addWidget(QtWidgets.QLabel("表示カラー:", self))
+        self.combo_color = QtWidgets.QComboBox(self)
+        self.combo_color.addItems(["黒色（図面標準）", "緑色", "赤色", "青色", "白色"])
+        self.combo_color.setCurrentText("黒色（図面標準）")
+        layout.addWidget(self.combo_color)
+
+        layout.addSpacing(15)
+
+        # 5. 実行ボタン
+        self.btn_run = QtWidgets.QPushButton("選択した円の中心に中心線を作成", self)
+        self.btn_run.setStyleSheet("font-weight: bold; height: 35px; background-color: #2b579a; color: white;")
+        self.btn_run.clicked.connect(self.generate_centerline_from_selection)
+        layout.addWidget(self.btn_run)
+        
+        self.lbl_status = QtWidgets.QLabel("※3D画面で円（円弧）のエッジを選択してからボタンを押してください", self)
+        self.lbl_status.setStyleSheet("color: blue; font-weight: bold;")
+        layout.addWidget(self.lbl_status)
+
+    def generate_centerline_from_selection(self):
+        selection = Gui.Selection.getSelectionEx()
+        
+        if not selection:
+            QtWidgets.QMessageBox.warning(self, "エラー", "3D画面で円または円弧のエッジを選択してください。")
+            return
+
+        try:
+            input_offset = float(self.txt_offset.text())
+            line_w = float(self.txt_line_width.text())
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "エラー", "数値を入れてください。")
+            return
+
+        # カラーの決定
+        color_name = self.combo_color.currentText()
+        if color_name == "赤色": my_color = (1.0, 0.0, 0.0, 1.0)
+        elif color_name == "青色": my_color = (0.0, 0.0, 1.0, 1.0)
+        elif color_name == "白色": my_color = (1.0, 1.0, 1.0, 1.0)
+        elif color_name == "緑色": my_color = (0.0, 1.0, 0.0, 1.0)
+        else: my_color = (0.0, 0.0, 0.0, 1.0)
+
+        # Draft/DrawStyle 用の線種指定文字列
+        style_idx = self.combo_style.currentIndex()
+        if style_idx == 1:
+            draw_style_str = "Dashed"
+        elif style_idx == 2:
+            draw_style_str = "Dashdot"
+        else:
+            draw_style_str = "Continuous"
+
+        doc = App.ActiveDocument
+        if not doc:
+            return
+
+        success_count = 0
+
+        for sel_obj in selection:
+            for sub_shape in sel_obj.SubObjects:
+                if hasattr(sub_shape, "Curve") and isinstance(sub_shape.Curve, Part.Circle):
+                    circle_geom = sub_shape.Curve
+                    center = circle_geom.Center
+                    radius = circle_geom.Radius
+                    
+                    cx, cy, cz = center.x, center.y, center.z
+
+                    if self.combo_calc_base.currentIndex() == 0:
+                        total_len = input_offset
+                    else:
+                        total_len = radius + input_offset
+
+                    # 💡【核心修正】Part.makeLine ではなく、Draft.make_wire を使ってグループ出力を統一
+                    # 水平線の作成
+                    h_wire = Draft.make_wire(
+                        [App.Vector(cx - total_len, cy, cz), App.Vector(cx + total_len, cy, cz)],
+                        closed=False
+                    )
+                    # 垂直線の作成
+                    v_wire = Draft.make_wire(
+                        [App.Vector(cx, cy - total_len, cz), App.Vector(cx, cy + total_len, cz)],
+                        closed=False
+                    )
+
+                    # それぞれのDraftオブジェクトに外観（DrawStyle, カラー, 太さ）を適用
+                    for wire_obj in [h_wire, v_wire]:
+                        if hasattr(wire_obj, "ViewObject") and wire_obj.ViewObject:
+                            wire_obj.ViewObject.LineWidth = line_w
+                            wire_obj.ViewObject.LineColor = my_color
+                            # Draft標準プロパティの DrawStyle に流し込む
+                            if hasattr(wire_obj.ViewObject, "DrawStyle"):
+                                wire_obj.ViewObject.DrawStyle = draw_style_str
+                        
+                        # 既存のグループルールに合わせて自動グループ化
+                        Draft.autogroup(wire_obj)
+                    
+                    success_count += 1
+
+        if success_count > 0:
+            doc.recompute()
+            Gui.updateGui()
+            self.lbl_status.setText(f"状態: {success_count}個の円にDraft中心線を作成しました！")
+            self.lbl_status.setStyleSheet("color: green; font-weight: bold;")
+        else:
+            QtWidgets.QMessageBox.warning(self, "認識エラー", "選択されたエッジから円の形状を検出できませんでした。")
+
+    def closeEvent(self, event):
+        event.accept()
+
+# 多重起動防止
+if 'current_perfect_draft_dialog' in globals():
+    try:
+        current_perfect_draft_dialog.close()
+    except:
+        pass
+
+current_perfect_draft_dialog = PerfectDraftCenterlineTool()
+current_perfect_draft_dialog.show()

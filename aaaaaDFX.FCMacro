@@ -1,0 +1,1654 @@
+import FreeCAD as App
+import TechDrawGui
+import ezdxf
+import os
+import re
+import math
+import xml.etree.ElementTree as ET
+from PySide import QtWidgets
+
+# ============================================================
+# 基本設定
+# ============================================================
+
+doc = App.ActiveDocument
+
+if doc is None:
+    raise Exception("ActiveDocumentがありません")
+
+SCALE = 0.1
+
+# ============================================================
+# TechDraw Page取得
+# ============================================================
+
+page = None
+
+for obj in doc.Objects:
+    try:
+        if obj.TypeId == "TechDraw::DrawPage":
+            page = obj
+            break
+    except:
+        pass
+
+if page is None:
+    raise Exception("TechDraw Pageが見つかりません")
+
+print("")
+print("========================================")
+print("TechDraw Page")
+print("========================================")
+print("Page =", page.Name)
+print("Label =", page.Label)
+
+# ============================================================
+# 保存先
+# ============================================================
+
+default_name = str(doc.Label) + ".dxf"
+
+dxf_file, _ = QtWidgets.QFileDialog.getSaveFileName(
+    None,
+    "DXF保存先を指定",
+    default_name,
+    "DXF Files (*.dxf);;All Files (*)"
+)
+
+if not dxf_file:
+    print("DXF保存がキャンセルされました")
+    raise SystemExit
+
+if not dxf_file.lower().endswith(".dxf"):
+    dxf_file += ".dxf"
+
+svg_file = os.path.splitext(dxf_file)[0] + "_source.svg"
+
+# ============================================================
+# SVG出力
+# ============================================================
+
+print("")
+print("========================================")
+print("TechDraw SVG出力")
+print("========================================")
+
+try:
+    TechDrawGui.exportPageAsSvg(
+        page,
+        svg_file
+    )
+except Exception as e:
+    raise Exception(
+        "SVG出力に失敗しました: " + str(e)
+    )
+
+print("SVG =", svg_file)
+
+if not os.path.exists(svg_file):
+    raise Exception(
+        "SVGファイルが作成されていません:\n" +
+        svg_file
+    )
+
+print("SVG存在 =", True)
+print("SVGサイズ =", os.path.getsize(svg_file))
+
+# ============================================================
+# SVG読み込み
+# ============================================================
+
+with open(svg_file, "r", encoding="utf-8") as f:
+    svg = f.read()
+
+root = ET.fromstring(svg)
+
+print("SVG text size =", len(svg))
+print("SVG→DXF SCALE =", SCALE)
+
+# ============================================================
+# transform解析
+# ============================================================
+
+def parse_transform(s):
+
+    if not s:
+        return (
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+        )
+
+    m = re.search(
+        r"matrix\s*\(\s*"
+        r"([-\d.eE+]+)\s*,\s*"
+        r"([-\d.eE+]+)\s*,\s*"
+        r"([-\d.eE+]+)\s*,\s*"
+        r"([-\d.eE+]+)\s*,\s*"
+        r"([-\d.eE+]+)\s*,\s*"
+        r"([-\d.eE+]+)\s*\)",
+        s
+    )
+
+    if not m:
+        return (
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+        )
+
+    return tuple(
+        float(v)
+        for v in m.groups()
+    )
+
+# ============================================================
+# SVG座標 → DXF座標
+# ============================================================
+
+def svg_to_dxf(x, y, transform):
+
+    a, b, c, d, tx, ty = parse_transform(
+        transform
+    )
+
+    xx = a * x + c * y
+    yy = b * x + d * y
+
+    xx *= SCALE
+    yy *= SCALE
+
+    tx *= SCALE
+    ty *= SCALE
+
+    # 形状だけ180°回転
+    yy = -yy
+
+    # ビュー配置位置は変更しない
+    return (
+        xx + tx,
+        yy + ty
+    )
+
+# ============================================================
+# SVG transform → DXF文字角度
+# ============================================================
+
+def transform_to_dxf_angle(transform):
+
+    a, b, c, d, tx, ty = parse_transform(
+        transform
+    )
+
+    angle = math.degrees(
+        math.atan2(-b, a)
+    )
+
+    while angle <= -180:
+        angle += 360
+
+    while angle > 180:
+        angle -= 360
+
+    return angle
+
+# ============================================================
+# PATH解析
+# ============================================================
+
+line_re = re.compile(
+    r"M\s*([-\d.eE+]+)\s*,\s*"
+    r"([-\d.eE+]+)"
+    r"\s*L\s*([-\d.eE+]+)\s*,\s*"
+    r"([-\d.eE+]+)"
+)
+
+# ============================================================
+# SVG PATH収集
+# ============================================================
+
+solid_lines = []
+dashed_lines = []
+circles = []
+
+for elem in root.iter():
+
+    if elem.tag.split("}")[-1] != "g":
+        continue
+
+    transform = elem.attrib.get(
+        "transform",
+        ""
+    )
+
+    stroke = elem.attrib.get(
+        "stroke",
+        ""
+    )
+
+    dash = elem.attrib.get(
+        "stroke-dasharray",
+        ""
+    )
+
+    offset = elem.attrib.get(
+        "stroke-dashoffset",
+        ""
+    )
+
+    width = elem.attrib.get(
+        "stroke-width",
+        ""
+    )
+
+    if not stroke:
+        continue
+
+    for child in elem:
+
+        if child.tag.split("}")[-1] != "path":
+            continue
+
+        d = child.attrib.get(
+            "d",
+            ""
+        )
+
+        if not d:
+            continue
+
+        # ====================================================
+        # 直線
+        # ====================================================
+
+        m = line_re.fullmatch(
+            d.strip()
+        )
+
+        if m:
+
+            x1 = float(m.group(1))
+            y1 = float(m.group(2))
+            x2 = float(m.group(3))
+            y2 = float(m.group(4))
+
+            p1 = svg_to_dxf(
+                x1,
+                y1,
+                transform
+            )
+
+            p2 = svg_to_dxf(
+                x2,
+                y2,
+                transform
+            )
+
+            item = {
+                "p1": p1,
+                "p2": p2,
+                "width": width,
+                "dash": dash,
+                "offset": offset,
+                "transform": transform
+            }
+
+            if dash:
+                dashed_lines.append(item)
+            else:
+                solid_lines.append(item)
+
+            continue
+
+        # ====================================================
+        # 円
+        # ====================================================
+
+        nums = re.findall(
+            r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+            r"(?:[eE][-+]?\d+)?",
+            d
+        )
+
+        if len(nums) == 26 and "C" in d:
+
+            try:
+
+                pts = []
+
+                for i in range(
+                    0,
+                    len(nums),
+                    2
+                ):
+
+                    pts.append(
+                        (
+                            float(nums[i]),
+                            float(nums[i + 1])
+                        )
+                    )
+
+                xs = [
+                    p[0]
+                    for p in pts
+                ]
+
+                ys = [
+                    p[1]
+                    for p in pts
+                ]
+
+                xmin = min(xs)
+                xmax = max(xs)
+                ymin = min(ys)
+                ymax = max(ys)
+
+                cx = (
+                    xmin + xmax
+                ) / 2.0
+
+                cy = (
+                    ymin + ymax
+                ) / 2.0
+
+                rx = (
+                    xmax - xmin
+                ) / 2.0
+
+                ry = (
+                    ymax - ymin
+                ) / 2.0
+
+                if abs(rx - ry) < 0.01:
+
+                    center = svg_to_dxf(
+                        cx,
+                        cy,
+                        transform
+                    )
+
+                    radius = (
+                        rx * SCALE
+                    )
+
+                    circles.append(
+                        {
+                            "center": center,
+                            "radius": radius,
+                            "dash": dash,
+                            "offset": offset,
+                            "width": width,
+                            "stroke": stroke,
+                            "transform": transform
+                        }
+                    )
+
+            except:
+                pass
+
+# ============================================================
+# 重複除去
+# ============================================================
+
+def line_key(item):
+
+    p1 = item["p1"]
+    p2 = item["p2"]
+
+    a = (
+        round(p1[0], 6),
+        round(p1[1], 6)
+    )
+
+    b = (
+        round(p2[0], 6),
+        round(p2[1], 6)
+    )
+
+    if a > b:
+        a, b = b, a
+
+    return a, b
+
+
+def circle_key(item):
+
+    c = item["center"]
+
+    return (
+        round(c[0], 6),
+        round(c[1], 6),
+        round(item["radius"], 6),
+        item["dash"]
+    )
+
+
+solid_unique = {}
+dashed_unique = {}
+circle_unique = {}
+
+for item in solid_lines:
+    solid_unique[
+        line_key(item)
+    ] = item
+
+for item in dashed_lines:
+    dashed_unique[
+        line_key(item)
+    ] = item
+
+for item in circles:
+    circle_unique[
+        circle_key(item)
+    ] = item
+
+solid_lines = list(
+    solid_unique.values()
+)
+
+dashed_lines = list(
+    dashed_unique.values()
+)
+
+circles = list(
+    circle_unique.values()
+)
+
+print("")
+print("========================================")
+print("SVG解析結果")
+print("========================================")
+print("実線 =", len(solid_lines))
+print("破線 =", len(dashed_lines))
+print("円   =", len(circles))
+
+# ============================================================
+# TechDraw 寸法・注釈情報取得
+# ============================================================
+
+dimension_objects = []
+annotation_objects = []
+
+for obj in page.Views:
+
+    try:
+
+        if obj.TypeId == "TechDraw::DrawViewDimension":
+
+            dimension_objects.append(obj)
+
+            print("")
+            print("========================================")
+            print("寸法検出")
+            print("========================================")
+            print("Name       =", obj.Name)
+            print("Label      =", obj.Label)
+            print("Type       =", obj.Type)
+            print("X          =", obj.X)
+            print("Y          =", obj.Y)
+            print("Rotation   =", obj.Rotation)
+            print("FormatSpec =", obj.FormatSpec)
+
+        elif obj.TypeId == "TechDraw::DrawViewAnnotation":
+
+            annotation_objects.append(obj)
+
+            print("")
+            print("注釈検出")
+            print("Name  =", obj.Name)
+            print("Label =", obj.Label)
+
+    except:
+        pass
+
+# ============================================================
+# 寸法形状取得
+#
+# 重要:
+#
+# getLinearPoints()
+#     → 寸法対象・補助線側の基準点
+#
+# getArrowPositions()
+#     → 実際の寸法線上の矢印位置
+#
+# 今回は寸法線そのものを
+# getArrowPositions() の2点で作る。
+# ============================================================
+
+dimension_geometry = []
+
+for dim in dimension_objects:
+
+    try:
+
+        pts = dim.getLinearPoints()
+        arrows = dim.getArrowPositions()
+
+        print("")
+        print("========================================")
+        print("寸法形状")
+        print("========================================")
+        print("Name =", dim.Name)
+        print("Type =", dim.Type)
+
+        print("")
+        print("LinearPoints:")
+
+        for i, p in enumerate(pts):
+            print(
+                " ",
+                i,
+                "=",
+                p
+            )
+
+        print("")
+        print("ArrowPositions:")
+
+        for i, p in enumerate(arrows):
+            print(
+                " ",
+                i,
+                "=",
+                p
+            )
+
+        print("")
+        print("X =", dim.X)
+        print("Y =", dim.Y)
+        print("Rotation =", dim.Rotation)
+        print("FormatSpec =", dim.FormatSpec)
+
+        if len(arrows) >= 2:
+
+            dimension_geometry.append(
+                {
+                    "object": dim,
+                    "type": dim.Type,
+                    "points": pts,
+                    "arrows": arrows
+                }
+            )
+
+    except Exception as e:
+
+        print(
+            "寸法形状取得失敗:",
+            getattr(
+                dim,
+                "Name",
+                ""
+            ),
+            e
+        )
+
+# ============================================================
+# SVG TEXT収集
+# ============================================================
+
+svg_texts = []
+
+for parent in root.iter():
+
+    if parent.tag.split("}")[-1] != "g":
+        continue
+
+    transform = parent.attrib.get(
+        "transform",
+        ""
+    )
+
+    for child in parent:
+
+        tag = child.tag.split("}")[-1]
+
+        if tag != "text":
+            continue
+
+        text_value = "".join(
+            child.itertext()
+        ).strip()
+
+        if not text_value:
+            continue
+
+        try:
+
+            x = float(
+                child.attrib.get(
+                    "x",
+                    "0"
+                )
+            )
+
+            y = float(
+                child.attrib.get(
+                    "y",
+                    "0"
+                )
+            )
+
+            font_size = float(
+                child.attrib.get(
+                    "font-size",
+                    "0"
+                )
+            )
+
+        except:
+
+            continue
+
+        font_family = child.attrib.get(
+            "font-family",
+            ""
+        )
+
+        p = svg_to_dxf(
+            x,
+            y,
+            transform
+        )
+
+        angle = transform_to_dxf_angle(
+            transform
+        )
+
+        item = {
+            "text": text_value,
+            "x": x,
+            "y": y,
+            "font_size": font_size,
+            "font_family": font_family,
+            "transform": transform,
+            "position": p,
+            "angle": angle
+        }
+
+        svg_texts.append(item)
+
+        print("")
+        print("TEXT:")
+        print("  文字       =", repr(text_value))
+        print("  SVG x      =", x)
+        print("  SVG y      =", y)
+        print("  DXF x      =", p[0])
+        print("  DXF y      =", p[1])
+        print("  font-size  =", font_size)
+        print("  font-family=", font_family)
+        print("  angle      =", angle)
+
+# ============================================================
+# DXF作成
+# ============================================================
+
+print("")
+print("========================================")
+print("DXF生成")
+print("========================================")
+
+dxf = ezdxf.new(
+    "R2010"
+)
+
+# ============================================================
+# CP932 / 日本語
+# ============================================================
+
+dxf.encoding = "cp932"
+dxf.header[
+    "$DWGCODEPAGE"
+] = "ANSI_932"
+
+print(
+    "DXF version   :",
+    dxf.dxfversion
+)
+
+print(
+    "DXF release   :",
+    dxf.acad_release
+)
+
+print(
+    "DXF encoding  :",
+    dxf.encoding
+)
+
+print(
+    "DWGCODEPAGE   :",
+    dxf.header[
+        "$DWGCODEPAGE"
+    ]
+)
+
+msp = dxf.modelspace()
+
+# ============================================================
+# レイヤー
+# ============================================================
+
+if "Visible" not in dxf.layers:
+
+    dxf.layers.add(
+        "Visible",
+        color=7,
+        linetype="CONTINUOUS"
+    )
+
+if "Hidden" not in dxf.layers:
+
+    dxf.layers.add(
+        "Hidden",
+        color=8,
+        linetype="HIDDEN"
+    )
+
+if "Circle" not in dxf.layers:
+
+    dxf.layers.add(
+        "Circle",
+        color=7,
+        linetype="CONTINUOUS"
+    )
+
+if "Text" not in dxf.layers:
+
+    dxf.layers.add(
+        "Text",
+        color=7,
+        linetype="CONTINUOUS"
+    )
+
+if "Dimension" not in dxf.layers:
+
+    dxf.layers.add(
+        "Dimension",
+        color=7,
+        linetype="CONTINUOUS"
+    )
+
+# ============================================================
+# HIDDEN線種
+# ============================================================
+
+if "HIDDEN" not in dxf.linetypes:
+
+    dxf.linetypes.add(
+        "HIDDEN",
+        description="Hidden line",
+        pattern=[
+            4.2,
+            -1.05
+        ]
+    )
+
+# ============================================================
+# 範囲収集
+# ============================================================
+
+ext_points = []
+
+
+def add_ext_point(p):
+
+    try:
+
+        ext_points.append(
+            (
+                float(p[0]),
+                float(p[1])
+            )
+        )
+
+    except:
+        pass
+
+# ============================================================
+# SVG実線
+# ============================================================
+
+solid_count = 0
+
+for item in solid_lines:
+
+    p1 = item["p1"]
+    p2 = item["p2"]
+
+    msp.add_line(
+        p1,
+        p2,
+        dxfattribs={
+            "layer": "Visible",
+            "linetype": "CONTINUOUS"
+        }
+    )
+
+    add_ext_point(p1)
+    add_ext_point(p2)
+
+    solid_count += 1
+
+# ============================================================
+# SVG破線
+# ============================================================
+
+dashed_count = 0
+
+for item in dashed_lines:
+
+    p1 = item["p1"]
+    p2 = item["p2"]
+
+    msp.add_line(
+        p1,
+        p2,
+        dxfattribs={
+            "layer": "Hidden",
+            "linetype": "HIDDEN"
+        }
+    )
+
+    add_ext_point(p1)
+    add_ext_point(p2)
+
+    dashed_count += 1
+
+# ============================================================
+# SVG円
+# ============================================================
+
+circle_count = 0
+circle_dashed_count = 0
+
+for item in circles:
+
+    center = item["center"]
+    radius = item["radius"]
+    dash = item["dash"]
+
+    if dash:
+
+        msp.add_circle(
+            center,
+            radius,
+            dxfattribs={
+                "layer": "Hidden",
+                "linetype": "HIDDEN"
+            }
+        )
+
+        circle_dashed_count += 1
+
+    else:
+
+        msp.add_circle(
+            center,
+            radius,
+            dxfattribs={
+                "layer": "Circle",
+                "linetype": "CONTINUOUS"
+            }
+        )
+
+    add_ext_point(
+        (
+            center[0] - radius,
+            center[1] - radius
+        )
+    )
+
+    add_ext_point(
+        (
+            center[0] + radius,
+            center[1] + radius
+        )
+    )
+
+    circle_count += 1
+
+# ============================================================
+# FreeCAD寸法座標 → DXF座標
+# ============================================================
+
+def dimension_point(p):
+
+    x = float(p.x) * SCALE
+    y = float(p.y) * SCALE
+
+    # SVG側と同じY反転
+    y = -y
+
+    return x, y
+
+# ============================================================
+# 寸法矢印
+# ============================================================
+
+def add_dimension_arrow(
+    tip,
+    other,
+    size=2.0
+):
+
+    dx = other[0] - tip[0]
+    dy = other[1] - tip[1]
+
+    length = math.hypot(
+        dx,
+        dy
+    )
+
+    if length < 1e-9:
+        return 0
+
+    ux = dx / length
+    uy = dy / length
+
+    # 寸法線に対して垂直
+    px = -uy
+    py = ux
+
+    half = size * 0.35
+
+    base_x = (
+        tip[0] +
+        ux * size
+    )
+
+    base_y = (
+        tip[1] +
+        uy * size
+    )
+
+    p_left = (
+        base_x + px * half,
+        base_y + py * half
+    )
+
+    p_right = (
+        base_x - px * half,
+        base_y - py * half
+    )
+
+    msp.add_line(
+        tip,
+        p_left,
+        dxfattribs={
+            "layer": "Dimension",
+            "linetype": "CONTINUOUS"
+        }
+    )
+
+    msp.add_line(
+        tip,
+        p_right,
+        dxfattribs={
+            "layer": "Dimension",
+            "linetype": "CONTINUOUS"
+        }
+    )
+
+    add_ext_point(tip)
+    add_ext_point(p_left)
+    add_ext_point(p_right)
+
+    return 2
+
+# ============================================================
+# TechDraw寸法
+#
+# 重要:
+#
+# 寸法線 = ArrowPositions[0] → ArrowPositions[1]
+#
+# 補助線 = LinearPoints[0] → ArrowPositions[0]
+#          LinearPoints[1] → ArrowPositions[1]
+# ============================================================
+
+dimension_line_count = 0
+dimension_extension_count = 0
+dimension_arrow_count = 0
+
+for item in dimension_geometry:
+
+    dim = item["object"]
+    pts = item["points"]
+    arrows = item["arrows"]
+
+    try:
+
+        print("")
+        print("========================================")
+        print("寸法DXF出力")
+        print("========================================")
+        print("Name =", dim.Name)
+        print("Type =", dim.Type)
+
+        # ====================================================
+        # ArrowPositions
+        # ====================================================
+
+        a1 = dimension_point(
+            arrows[0]
+        )
+
+        a2 = dimension_point(
+            arrows[1]
+        )
+
+        print("")
+        print("Arrow 0 DXF =", a1)
+        print("Arrow 1 DXF =", a2)
+
+        dx = a2[0] - a1[0]
+        dy = a2[1] - a1[1]
+
+        print("寸法線 DX =", dx)
+        print("寸法線 DY =", dy)
+        print(
+            "寸法線 Length =",
+            math.hypot(dx, dy)
+        )
+
+        # ====================================================
+        # 寸法線
+        #
+        # ここが今回の最重要変更
+        # ====================================================
+
+        msp.add_line(
+            a1,
+            a2,
+            dxfattribs={
+                "layer": "Dimension",
+                "linetype": "CONTINUOUS"
+            }
+        )
+
+        add_ext_point(a1)
+        add_ext_point(a2)
+
+        dimension_line_count += 1
+
+        # ====================================================
+        # Distance系の補助線
+        # ====================================================
+
+        if (
+            dim.Type in (
+                "Distance",
+                "DistanceX",
+                "DistanceY"
+            )
+            and
+            len(pts) >= 2
+        ):
+
+            p1 = dimension_point(
+                pts[0]
+            )
+
+            p2 = dimension_point(
+                pts[1]
+            )
+
+            print("")
+            print("LinearPoint 0 DXF =", p1)
+            print("LinearPoint 1 DXF =", p2)
+
+            msp.add_line(
+                p1,
+                a1,
+                dxfattribs={
+                    "layer": "Dimension",
+                    "linetype": "CONTINUOUS"
+                }
+            )
+
+            msp.add_line(
+                p2,
+                a2,
+                dxfattribs={
+                    "layer": "Dimension",
+                    "linetype": "CONTINUOUS"
+                }
+            )
+
+            add_ext_point(p1)
+            add_ext_point(p2)
+
+            dimension_extension_count += 2
+
+        # ====================================================
+        # Diameter
+        #
+        # Diameterの場合はLinearPointsが
+        # (0,0) / (0,0)になることがあるので、
+        # 補助線は作らない。
+        # ====================================================
+
+        # ====================================================
+        # 矢印
+        # ====================================================
+
+        dimension_arrow_count += (
+            add_dimension_arrow(
+                a1,
+                a2
+            )
+        )
+
+        dimension_arrow_count += (
+            add_dimension_arrow(
+                a2,
+                a1
+            )
+        )
+
+    except Exception as e:
+
+        print(
+            "寸法DXF出力失敗:",
+            getattr(
+                dim,
+                "Name",
+                ""
+            ),
+            e
+        )
+
+# ============================================================
+# SVG TEXT
+# ============================================================
+
+text_count = 0
+dimension_text_count = 0
+annotation_text_count = 0
+
+dimension_transforms = []
+
+for item in svg_texts:
+
+    transform = item[
+        "transform"
+    ]
+
+    a, b, c, d, tx, ty = parse_transform(
+        transform
+    )
+
+    angle = math.degrees(
+        math.atan2(
+            -b,
+            a
+        )
+    )
+
+    if abs(angle) > 0.001:
+
+        dimension_transforms.append(
+            transform
+        )
+
+dimension_transforms = list(
+    dict.fromkeys(
+        dimension_transforms
+    )
+)
+
+# ============================================================
+# SVG TEXTを書き出す
+# ============================================================
+
+for item in svg_texts:
+
+    text_value = item[
+        "text"
+    ]
+
+    position = item[
+        "position"
+    ]
+
+    angle = item[
+        "angle"
+    ]
+
+    font_size = item[
+        "font_size"
+    ]
+
+    transform = item[
+        "transform"
+    ]
+
+    text_height = (
+        font_size * SCALE
+    )
+
+    if text_height <= 0:
+        text_height = 2.5
+
+    is_dimension = False
+
+    # ========================================================
+    # Diameter
+    # ========================================================
+
+    for dim in dimension_objects:
+
+        try:
+
+            if dim.Type == "Diameter":
+
+                if (
+                    "Φ" in text_value
+                    or
+                    "Ø" in text_value
+                    or
+                    "φ" in text_value
+                ):
+
+                    is_dimension = True
+                    break
+
+            elif dim.Type == "DistanceY":
+
+                if abs(angle) > 0.001:
+
+                    is_dimension = True
+                    break
+
+            elif dim.Type == "Distance":
+
+                if abs(angle) > 0.001:
+
+                    is_dimension = True
+                    break
+
+        except:
+            pass
+
+    # ========================================================
+    # 寸法系transform
+    # ========================================================
+
+    if transform in dimension_transforms:
+
+        is_dimension = True
+
+    # ========================================================
+    # レイヤー
+    # ========================================================
+
+    if is_dimension:
+
+        layer = "Dimension"
+        dimension_text_count += 1
+
+    else:
+
+        layer = "Text"
+        annotation_text_count += 1
+
+    # ========================================================
+    # TEXT
+    # ========================================================
+
+    attribs = {
+        "layer": layer,
+        "height": text_height,
+        "rotation": angle
+    }
+
+    entity = msp.add_text(
+        text_value,
+        dxfattribs=attribs
+    )
+
+    entity.set_placement(
+        position
+    )
+
+    add_ext_point(position)
+
+    text_count += 1
+
+# ============================================================
+# EXTENTS計算
+# ============================================================
+
+if ext_points:
+
+    xmin = min(
+        p[0]
+        for p in ext_points
+    )
+
+    ymin = min(
+        p[1]
+        for p in ext_points
+    )
+
+    xmax = max(
+        p[0]
+        for p in ext_points
+    )
+
+    ymax = max(
+        p[1]
+        for p in ext_points
+    )
+
+    extmin = (
+        xmin,
+        ymin,
+        0.0
+    )
+
+    extmax = (
+        xmax,
+        ymax,
+        0.0
+    )
+
+else:
+
+    xmin = 0.0
+    ymin = 0.0
+    xmax = 0.0
+    ymax = 0.0
+
+    extmin = (
+        0.0,
+        0.0,
+        0.0
+    )
+
+    extmax = (
+        0.0,
+        0.0,
+        0.0
+    )
+
+# ============================================================
+# HEADER EXTENTS
+# ============================================================
+
+dxf.header[
+    "$EXTMIN"
+] = extmin
+
+dxf.header[
+    "$EXTMAX"
+] = extmax
+
+dxf.header[
+    "$PEXTMIN"
+] = extmin
+
+dxf.header[
+    "$PEXTMAX"
+] = extmax
+
+# ============================================================
+# LIMITS
+# ============================================================
+
+dxf.header[
+    "$LIMMIN"
+] = (
+    xmin,
+    ymin
+)
+
+dxf.header[
+    "$LIMMAX"
+] = (
+    xmax,
+    ymax
+)
+
+dxf.header[
+    "$PLIMMIN"
+] = (
+    xmin,
+    ymin
+)
+
+dxf.header[
+    "$PLIMMAX"
+] = (
+    xmax,
+    ymax
+)
+
+# ============================================================
+# HEADER確認
+# ============================================================
+
+print("")
+print("========================================")
+print("DXF HEADER確認")
+print("========================================")
+
+print(
+    "$ACADVER      =",
+    dxf.header["$ACADVER"]
+)
+
+print(
+    "$DWGCODEPAGE  =",
+    dxf.header["$DWGCODEPAGE"]
+)
+
+print(
+    "$EXTMIN       =",
+    dxf.header["$EXTMIN"]
+)
+
+print(
+    "$EXTMAX       =",
+    dxf.header["$EXTMAX"]
+)
+
+print(
+    "$PEXTMIN      =",
+    dxf.header["$PEXTMIN"]
+)
+
+print(
+    "$PEXTMAX      =",
+    dxf.header["$PEXTMAX"]
+)
+
+print(
+    "$LIMMIN       =",
+    dxf.header["$LIMMIN"]
+)
+
+print(
+    "$LIMMAX       =",
+    dxf.header["$LIMMAX"]
+)
+
+print(
+    "$PLIMMIN      =",
+    dxf.header["$PLIMMIN"]
+)
+
+print(
+    "$PLIMMAX      =",
+    dxf.header["$PLIMMAX"]
+)
+
+print("")
+print(
+    "HIDDEN linetype存在:",
+    "HIDDEN" in dxf.linetypes
+)
+
+print(
+    "HIDDEN layer linetype:",
+    dxf.layers.get(
+        "Hidden"
+    ).dxf.linetype
+)
+
+# ============================================================
+# DXF保存
+# ============================================================
+
+print("")
+print("========================================")
+print("DXF保存")
+print("========================================")
+
+dxf.saveas(
+    dxf_file
+)
+
+print("")
+print("保存完了:")
+print(dxf_file)
+
+# ============================================================
+# SVG削除
+# ============================================================
+
+print("")
+print("========================================")
+print("一時SVG削除")
+print("========================================")
+
+try:
+
+    if os.path.exists(svg_file):
+
+        os.remove(svg_file)
+
+        print(
+            "SVG削除完了:"
+        )
+
+        print(svg_file)
+
+    else:
+
+        print(
+            "SVGが見つかりません:"
+        )
+
+        print(svg_file)
+
+except Exception as e:
+
+    print(
+        "SVG削除失敗:"
+    )
+
+    print(e)
+
+# ============================================================
+# 結果
+# ============================================================
+
+print("")
+print("========================================")
+print("DXF生成完了")
+print("========================================")
+
+print(
+    "実線:",
+    solid_count
+)
+
+print(
+    "破線:",
+    dashed_count
+)
+
+print(
+    "円:",
+    circle_count
+)
+
+print(
+    "円(破線):",
+    circle_dashed_count
+)
+
+print(
+    "寸法線:",
+    dimension_line_count
+)
+
+print(
+    "寸法補助線:",
+    dimension_extension_count
+)
+
+print(
+    "寸法矢印線:",
+    dimension_arrow_count
+)
+
+print(
+    "TEXT:",
+    text_count
+)
+
+print(
+    "寸法TEXT:",
+    dimension_text_count
+)
+
+print(
+    "注釈TEXT:",
+    annotation_text_count
+)
+
+print("")
+print(
+    "EXTMIN:",
+    extmin
+)
+
+print(
+    "EXTMAX:",
+    extmax
+)
+
+print("")
+print("DXF:")
+print(dxf_file)
+
+print("")
+print("========================================")
+print("設定")
+print("========================================")
+
+print("DXF = R2010")
+print("文字コード = CP932")
+print("DWGCODEPAGE = ANSI_932")
+print("SVG → DXF SCALE =", SCALE)
+print("Y方向 = 反転")
+print("X方向 = 変更なし")
+print("形状 = 180°回転")
+print("ビュー配置位置 = 維持")
+print("寸法 = TechDraw API")
+print("寸法線 = getArrowPositions()")
+print("寸法補助線 = getLinearPoints() → getArrowPositions()")
+print("寸法矢印 = getArrowPositions()")
+print("SVG = 一時生成後、自動削除")
+
+print("========================================")

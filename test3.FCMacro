@@ -1,0 +1,19 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Draft
+# クリックした位置を取得
+doc =App.ActiveDocument
+
+p1 = Draft.getPoint()
+if p1 is None:
+    raise Exception("キャンセル")
+
+p2 = Draft.getPoint()
+if p2 is None:
+    raise Exception("キャンセル")
+
+#線作成
+line = Draft.makeArray(p1,p2)
+
+doc.recompute()
+print("線作成")

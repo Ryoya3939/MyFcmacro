@@ -1,0 +1,95 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+
+# ==========================
+# 設定
+# ==========================
+Tolerance = 0.01   # mm
+
+doc = App.ActiveDocument
+sel = Gui.Selection.getSelection()
+
+if len(sel) == 0:
+    raise Exception("エッジまたはワイヤーを選択してください")
+
+# --------------------------
+# エッジ収集
+# --------------------------
+edges = []
+
+for obj in sel:
+    if hasattr(obj, "Shape"):
+        edges.extend(obj.Shape.Edges)
+
+if not edges:
+    raise Exception("エッジが見つかりません")
+
+# --------------------------
+# コピー
+# --------------------------
+unused = [e.copy() for e in edges]
+
+ordered = [unused.pop(0)]
+
+while unused:
+
+    last = ordered[-1]
+    last_end = last.Vertexes[-1].Point
+
+    best = None
+    bestDist = 1e100
+    reverse = False
+
+    for e in unused:
+
+        p1 = e.Vertexes[0].Point
+        p2 = e.Vertexes[-1].Point
+
+        d1 = (p1-last_end).Length
+        d2 = (p2-last_end).Length
+
+        if d1 < bestDist:
+            bestDist = d1
+            best = e
+            reverse = False
+
+        if d2 < bestDist:
+            bestDist = d2
+            best = e
+            reverse = True
+
+    if best is None:
+        break
+
+    unused.remove(best)
+
+    if reverse:
+        best.reverse()
+
+    if bestDist > Tolerance:
+        App.Console.PrintWarning(
+            "隙間 %.4f mm を接続します\n" % bestDist
+        )
+
+    ordered.append(best)
+
+# --------------------------
+# Wire作成
+# --------------------------
+try:
+
+    wire = Part.Wire(ordered)
+
+except Exception as e:
+
+    raise Exception("Wireを作成できません\n%s" % str(e))
+
+obj = doc.addObject("Part::Feature", "JoinedWire")
+obj.Shape = wire
+
+doc.recompute()
+
+App.Console.PrintMessage(
+    "完了：%d本のエッジを結合しました\n" % len(ordered)
+)
